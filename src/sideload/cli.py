@@ -48,6 +48,7 @@ from sideload.models import (
 )
 from sideload.signing import csr as csr_mod
 from sideload.signing import entitlements as entitlements_mod
+from sideload.signing import injection as injection_mod
 from sideload.signing import ipa as ipa_mod
 from sideload.signing import profile as profile_mod
 from sideload.signing import signer as signer_mod
@@ -138,6 +139,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail instead of dropping entitlements the profile does not grant",
     )
+    sign.add_argument(
+        "--inject",
+        metavar="DYLIB",
+        action="append",
+        help=(
+            "inject a .dylib into the app's Frameworks directory and load it at "
+            "launch; repeatable"
+        ),
+    )
+    sign.add_argument(
+        "--inject-deb",
+        metavar="DEB",
+        action="append",
+        help=(
+            "inject every MobileSubstrate dylib from a .deb tweak package; "
+            "nothing is installed on the device; repeatable"
+        ),
+    )
 
     install_parser = subparsers.add_parser(
         "install", parents=[common], help="sign an IPA and install it over USB"
@@ -153,6 +172,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-entitlements",
         action="store_true",
         help="fail instead of dropping entitlements the profile does not grant",
+    )
+    install_parser.add_argument(
+        "--inject",
+        metavar="DYLIB",
+        action="append",
+        help=(
+            "inject a .dylib into the app's Frameworks directory and load it at "
+            "launch; repeatable"
+        ),
+    )
+    install_parser.add_argument(
+        "--inject-deb",
+        metavar="DEB",
+        action="append",
+        help=(
+            "inject every MobileSubstrate dylib from a .deb tweak package; "
+            "nothing is installed on the device; repeatable"
+        ),
     )
 
     uninstall = subparsers.add_parser(
@@ -707,6 +744,22 @@ def _sign_pipeline(
     if not ipa_path.is_file():
         raise errors.UsageError(f"IPA file not found: {ipa_path}")
     bundle = ipa_mod.extract_ipa(ipa_path)
+
+    # Tweak and dylib injection sits between extraction and signing:
+    # the copied dylibs are loose Mach-O files inside Frameworks, so
+    # signable_inventory picks them up and the signer signs them before
+    # the app executable. Injection runs before any Apple API side
+    # effect later in this function, so a bad input aborts cheaply.
+    # Without the flags the call is skipped entirely, so the no flag
+    # path is unchanged.
+    inject_dylibs = [
+        Path(str(item)).expanduser() for item in (getattr(args, "inject", None) or [])
+    ]
+    inject_debs = [
+        Path(str(item)).expanduser() for item in (getattr(args, "inject_deb", None) or [])
+    ]
+    if inject_dylibs or inject_debs:
+        injection_mod.apply_injections(bundle, inject_dylibs, inject_debs)
 
     # step 4: ensure the signing certificate exists
     machine_name = csr_mod.make_machine_name()
