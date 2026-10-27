@@ -582,13 +582,19 @@ def test_two_factor_success_repeats_the_srp_exchange() -> None:
     operations = [body["Request"]["o"] for body in server.posts]
     assert operations == ["init", "complete", "init", "complete", "apptokens"]
 
-    trigger_urls = [url for url, _ in server.gets if url == GSA_TWO_FACTOR_TRIGGER_URL]
+    trigger_entries = [
+        (url, headers)
+        for url, headers in server.gets
+        if url == GSA_TWO_FACTOR_TRIGGER_URL
+    ]
     validate_entries = [
         (url, headers)
         for url, headers in server.gets
         if url == GSA_TWO_FACTOR_VALIDATE_URL
     ]
-    assert len(trigger_urls) == 1
+    assert len(trigger_entries) == 1
+    trigger_headers = trigger_entries[0][1]
+    assert trigger_headers["Accept"] == "application/json"
     assert len(validate_entries) == 2
     assert server.codes_seen == ["000000", "246810"]
 
@@ -600,6 +606,8 @@ def test_two_factor_success_repeats_the_srp_exchange() -> None:
     assert "com.apple.MobileSMS" in validate_headers["X-MMe-Client-Info"]
     assert validate_headers["X-Apple-Identity-Token"] == identity
     assert validate_headers["security-code"] == "000000"
+    assert validate_headers["Content-Type"] == "text/x-xml-plist"
+    assert validate_headers["Accept"] == "text/x-xml-plist"
     # AltServer spells this header "X-Mme-Device-Id" (lowercase "me").
     assert validate_headers["X-Mme-Device-Id"] == "device-udid-value"
     assert validate_headers["X-Apple-I-MD-M"] == "machine-id-value"
