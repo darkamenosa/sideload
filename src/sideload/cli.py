@@ -50,6 +50,7 @@ from sideload.models import (
     Team,
 )
 from sideload.signing import csr as csr_mod
+from sideload.signing import customize as customize_mod
 from sideload.signing import entitlements as entitlements_mod
 from sideload.signing import ipa as ipa_mod
 from sideload.signing import profile as profile_mod
@@ -76,6 +77,47 @@ _SIGNATURE_FAILURE_NAMES = frozenset(
         "MismatchedApplicationIdentifierEntitlement",
     }
 )
+
+
+def _add_customization_flags(parser: argparse.ArgumentParser) -> None:
+    """Sideloadly-style app customization flags shared by sign and install.
+
+    All of them are optional; with none given the pipeline behaves
+    exactly as before. The contracts live in signing/customize.py.
+    """
+    parser.add_argument(
+        "--name",
+        metavar="TEXT",
+        help="set CFBundleDisplayName and CFBundleName",
+    )
+    parser.add_argument(
+        "--remove-plugins",
+        action="store_true",
+        help="delete PlugIns/*.appex and watch content before any App ID "
+        "or profile is created",
+    )
+    parser.add_argument(
+        "--entitlements",
+        metavar="PATH",
+        help="merge entitlements from a plist; keys the profile does not "
+        "grant are dropped with a warning (an error with --strict-entitlements)",
+    )
+    parser.add_argument(
+        "--min-os",
+        metavar="VERSION",
+        help="set MinimumOSVersion (and DeploymentTarget when already present)",
+    )
+    parser.add_argument(
+        "--supported-devices",
+        metavar="LIST",
+        nargs="+",
+        help="replace UISupportedDevices; one device identifier per argument",
+    )
+    parser.add_argument(
+        "--icon",
+        metavar="PATH.png",
+        help="replace the app icon PNGs using the macOS sips tool",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -141,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail instead of dropping entitlements the profile does not grant",
     )
+    _add_customization_flags(sign)
 
     install_parser = subparsers.add_parser(
         "install", parents=[common], help="sign an IPA and install it over USB"
@@ -157,6 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail instead of dropping entitlements the profile does not grant",
     )
+    _add_customization_flags(install_parser)
 
     uninstall = subparsers.add_parser(
         "uninstall", parents=[common], help="uninstall an app from a device"
@@ -715,6 +759,19 @@ def _sign_pipeline(
     done, App ID created or reused, profile expiry, dropped
     entitlement keys, and (handled by the caller) the output path.
     """
+    # App customization flags (signing/customize.py) are validated
+    # first, so a bad --min-os or a missing file can never waste an
+    # Apple request; the edits themselves are applied right after the
+    # IPA is extracted, before the App ID / profile / entitlement loop
+    # and long before signing seals CodeResources.
+    customization = customize_mod.build_customization(
+        name=getattr(args, "name", None),
+        remove_plugins=bool(getattr(args, "remove_plugins", False)),
+        entitlements_path=getattr(args, "entitlements", None),
+        min_os=getattr(args, "min_os", None),
+        supported_devices=getattr(args, "supported_devices", None),
+        icon_path=getattr(args, "icon", None),
+    )
     paths, settings, store, session = _load_session()
     cache = cache_mod.ResourceCache(paths)
 
@@ -735,6 +792,12 @@ def _sign_pipeline(
     if not ipa_path.is_file():
         raise errors.UsageError(f"IPA file not found: {ipa_path}")
     bundle = ipa_mod.extract_ipa(ipa_path)
+
+    # Plugin removal runs here on purpose: before the App ID, profile,
+    # and entitlement loop below, with the bundle inventory recomputed
+    # so removed extensions are never provisioned or signed.
+    for note in customize_mod.apply_customization(bundle, customization):
+        print(note)
 
     # step 4: ensure the signing certificate exists
     machine_name = csr_mod.make_machine_name()
@@ -877,8 +940,12 @@ def _sign_pipeline(
 
     print(f"profile expires: {_format_datetime(main_profile.expiration_date)}")
 
-    # step 9: entitlements per bundle
+    # step 9: entitlements per bundle; --entitlements keys flow through
+    # build_entitlements' extra parameter, pre-filtered against each
+    # bundle's own profile so keys the profile does not grant still get
+    # dropped with a warning (an error under --strict-entitlements).
     strict = bool(getattr(args, "strict_entitlements", False))
+    custom_entitlements = customization.extra_entitlements
     entitlements_by_path: dict[str, dict[str, object]] = {}
     bundles = list(getattr(bundle, "all_bundles", []) or [])
     if bundle.main_bundle not in bundles:
@@ -887,8 +954,30 @@ def _sign_pipeline(
     for app_bundle in bundles:
         bundle_profile = profiles_by_root.get(app_bundle.root, main_profile)
         original_entitlements = entitlements_mod.read_entitlements(app_bundle.executable)
+        extra: dict[str, object] | None = None
+        if custom_entitlements:
+            extra, custom_dropped = customize_mod.split_extra_entitlements(
+                bundle_profile, custom_entitlements
+            )
+            if custom_dropped:
+                if strict:
+                    raise errors.EntitlementsError(
+                        "--entitlements requests keys the profile does not "
+                        "grant: " + ", ".join(custom_dropped),
+                        dropped=custom_dropped,
+                        hint=(
+                            "sign again without --strict-entitlements to drop "
+                            "these keys with a warning, or remove them from "
+                            "the entitlements plist"
+                        ),
+                    )
+                for key in custom_dropped:
+                    print(
+                        f"warning: entitlement '{key}' from --entitlements "
+                        "is not granted by the profile and was dropped"
+                    )
         merged, dropped = entitlements_mod.build_entitlements(
-            bundle_profile, original_entitlements, None, strict
+            bundle_profile, original_entitlements, extra, strict
         )
         for key in dropped:
             print(f"warning: entitlement '{key}' is not granted by the profile and was dropped")

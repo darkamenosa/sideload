@@ -371,6 +371,15 @@ interactively, never stored.
   which is the classic "invalid code signature" install failure.
 - Info.plist: CFBundleIdentifier rewritten to the resigned id; App
   Store leftovers (SC_Info/, _MASReceipt/) removed.
+- App customization (signing/customize.py, the Sideloadly-style
+  flags) runs between extraction and the App ID loop: plugin removal
+  first, with the bundle inventory recomputed so removed extensions
+  are never provisioned or signed, then the display name, minimum OS,
+  supported devices, and icon edits. All of it happens before signing
+  seals CodeResources. --entitlements keys are pre-filtered per bundle
+  against that bundle's profile and only granted keys flow into
+  build_entitlements' extra parameter; dropped keys warn, or fail
+  together with --strict-entitlements.
 - FairPlay encrypted App Store binaries cannot be re-signed usefully;
   detected and rejected as UnsupportedIPAError.
 
@@ -508,6 +517,7 @@ except trivial bodies.
 | src/sideload/signing/entitlements.py | SIGN | extract, merge, drop, strict mode |
 | src/sideload/signing/ipa.py | SIGN | unzip, inventory, plist edits, repack |
 | src/sideload/signing/signer.py | SIGN | codesign and ldid backends, order |
+| src/sideload/signing/customize.py | SIGN | app customization: plist edits, plugin removal, icon via sips, custom entitlements |
 | src/sideload/device/usbmux.py | DEVICE | subprocess wrappers for idevice tools |
 | src/sideload/device/installer.py | DEVICE | ideviceinstaller driving, error mapping |
 | src/sideload/daemon.py | GLUE | refresh loop helpers, plist generation, launchctl control |
