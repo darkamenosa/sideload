@@ -1118,3 +1118,13 @@ def test_build_refresh_plist_shape(tmp_path: Path) -> None:
         "StandardErrorPath": str(tmp_path / "refresh.log"),
     }
     assert daemon_mod.refresh_program_arguments()[1:] == ["-m", "sideload", "refresh", "--all"]
+
+
+def test_unattended_refresh_refuses_pending_certificate_rotation() -> None:
+    from sideload import config
+    from sideload.daemon import assert_no_pending_rotation
+
+    assert_no_pending_rotation(config.SideloadConfig())
+    with pytest.raises(errors.DaemonError) as excinfo:
+        assert_no_pending_rotation(config.SideloadConfig(rotate_certificate=True))
+    assert "rotation" in str(excinfo.value).lower()

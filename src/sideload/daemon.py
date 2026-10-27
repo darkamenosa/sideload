@@ -166,6 +166,22 @@ class RefreshAppOutcome:
     detail: str
 
 
+def assert_no_pending_rotation(settings: config.SideloadConfig) -> None:
+    """Refuse unattended certificate rotation.
+
+    "auth login --rotate-certificate" arms a destructive certificate
+    replacement. A background refresh must never trigger it.
+    """
+    if settings.rotate_certificate:
+        raise DaemonError(
+            "certificate rotation is armed; unattended refresh will not rotate certificates",
+            hint=(
+                "run sideload auth login --rotate-certificate, then run "
+                "sideload sign <ipa> interactively to rotate before refreshing"
+            ),
+        )
+
+
 def source_ipa_for(record: InstallRecord) -> Path | None:
     """The recorded source IPA when it still exists, else None.
 

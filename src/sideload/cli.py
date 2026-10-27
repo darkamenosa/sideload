@@ -1139,6 +1139,7 @@ def cmd_refresh(args: argparse.Namespace) -> int:
     if args.all and args.udid:
         raise errors.UsageError("--all and --udid are mutually exclusive")
     paths, settings, _store, session = _load_session()
+    daemon_mod.assert_no_pending_rotation(settings)
     cache = cache_mod.ResourceCache(paths)
     transport = usbmux_mod.LibimobiledeviceTransport()
     targets = _refresh_targets(cache, settings, args.udid, bool(args.all))
