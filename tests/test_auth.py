@@ -43,7 +43,6 @@ from sideload.apple.auth import (
     GSA_TWO_FACTOR_TRIGGER_URL,
     GSA_TWO_FACTOR_VALIDATE_URL,
     MAX_TWO_FACTOR_ATTEMPTS,
-    XCODE_USER_AGENT,
     GrandSlamClient,
     build_cpd,
 )
@@ -596,7 +595,9 @@ def test_two_factor_success_repeats_the_srp_exchange() -> None:
     # The 2FA header contract from AltSign requestTwoFactorCodeForDSID.
     _, validate_headers = validate_entries[0]
     identity = base64.b64encode(f"{ADSID}:{IDMS_TOKEN}".encode()).decode("ascii")
-    assert validate_headers["User-Agent"] == XCODE_USER_AGENT
+    assert validate_headers["User-Agent"] == auth_module.TWO_FACTOR_USER_AGENT
+    assert validate_headers["X-Apple-Client-App-Name"] == "Messages"
+    assert "com.apple.MobileSMS" in validate_headers["X-MMe-Client-Info"]
     assert validate_headers["X-Apple-Identity-Token"] == identity
     assert validate_headers["security-code"] == "000000"
     # AltServer spells this header "X-Mme-Device-Id" (lowercase "me").
@@ -1018,7 +1019,10 @@ def test_gsa_headers_disable_connection_reuse() -> None:
     client = GrandSlamClient(FakeAnisetteProvider())
     data = client.anisette.get_anisette()
     assert client._gsa_headers(data)["Connection"] == "close"
-    assert client._two_factor_headers("adsid", "token")["Connection"] == "close"
+    web = client._two_factor_headers("adsid", "token")
+    assert "Connection" not in web
+    assert web["X-Apple-Client-App-Name"] == "Messages"
+    assert "com.apple.MobileSMS" in web["X-MMe-Client-Info"]
 
 
 def test_hsc_409_marks_two_factor_already_pushed() -> None:

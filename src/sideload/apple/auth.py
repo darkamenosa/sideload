@@ -111,6 +111,20 @@ from sideload.errors import AuthError, TwoFactorError
 from sideload.models import Account, AnisetteData, AppleSession
 
 GSA_ENDPOINT = "https://gsa.apple.com/grandslam/GsService2"
+# Current GSA two-factor web header set (verified live August 2026).
+# The /auth endpoints are web endpoints with a Messages/browser identity,
+# not the plist service headers used for init and complete.
+TWO_FACTOR_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko)"
+)
+TWO_FACTOR_CFU_STATE = base64.b64encode(
+    b'<?xml version="1.0" encoding="UTF-8"?>\n'
+    b'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+    b'"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    b'<plist version="1.0">\n<array/>\n</plist>\n'
+).decode("ascii")
+
 GSA_TWO_FACTOR_TRIGGER_URL = "https://gsa.apple.com/auth/verify/trusteddevice"
 GSA_TWO_FACTOR_VALIDATE_URL = "https://gsa.apple.com/grandslam/GsService2/validate"
 GSA_PROTOCOL_VERSION = "1.0.1"
@@ -714,11 +728,14 @@ class GrandSlamClient:
     def _request_two_factor_push(self, adsid: str, idms_token: str) -> None:
         """GET /auth/verify/trusteddevice to push a code to trusted devices."""
         headers = self._two_factor_headers(adsid, idms_token)
+        headers["Accept"] = "application/json"
         response = self._get(GSA_TWO_FACTOR_TRIGGER_URL, headers)
         self._raise_for_http(response, "trusted device code push")
         if not 200 <= response.status_code < 300:
+            detail = response.text[:200].replace("\n", " ")
             raise AuthError(
-                f"Apple's trusted device code push failed with HTTP {response.status_code}."
+                f"Apple's trusted device code push failed with HTTP "
+                f"{response.status_code}: {detail}"
             )
 
     def _validate_security_code(self, adsid: str, idms_token: str, code: str) -> bool:
@@ -728,6 +745,8 @@ class GrandSlamClient:
         success, and raises AuthError for any other Apple error.
         """
         headers = self._two_factor_headers(adsid, idms_token)
+        headers["Content-Type"] = "text/x-xml-plist"
+        headers["Accept"] = "text/x-xml-plist"
         headers["security-code"] = code
         response = self._get(GSA_TWO_FACTOR_VALIDATE_URL, headers)
         self._raise_for_http(response, "security code validation")
@@ -747,28 +766,51 @@ class GrandSlamClient:
         raise AuthError(f"Apple rejected the security code with error {error_code}{detail}.")
 
     def _two_factor_headers(self, adsid: str, idms_token: str) -> dict[str, str]:
-        """The Xcode/anisette header set AltSign sends on 2FA requests."""
+        """The Messages/browser header set used by the /auth web endpoints.
+
+        The old AltSign Xcode headers are rejected with HTTP 403 by the
+        current two-factor endpoints. Content negotiation is set by the
+        caller: JSON for the code push, plist for code validation.
+        """
         data = self.anisette.get_anisette()
-        identity = f"{adsid}:{idms_token}"
-        encoded = base64.b64encode(identity.encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode(f"{adsid}:{idms_token}".encode()).decode(
+            "ascii"
+        )
+        groups = data.device_description.split()
+        head = " ".join(groups[:2]) if len(groups) >= 2 else data.device_description
         return {
-            "Content-Type": "text/x-xml-plist",
-            "User-Agent": XCODE_USER_AGENT,
-            "Accept": "text/x-xml-plist",
-            "Accept-Language": "en-us",
-            "X-Apple-App-Info": XCODE_APP_INFO,
-            "X-Xcode-Version": XCODE_VERSION,
-            _XCODE_IDENTITY_TOKEN_PREFIX: encoded,
+            "X-Apple-Identity-Token": encoded,
+            "X-Apple-Client-App-Name": "Messages",
+            "X-Apple-I-Client-Bundle-Id": "com.apple.MobileSMS",
+            "X-MMe-Client-Info": (
+                f"{head} <com.apple.AuthKit/1 "
+                "(com.apple.MobileSMS/1262.500.151.1.2)>"
+            ),
+            "X-Apple-AK-Context-Type": "imessage",
+            "User-Agent": TWO_FACTOR_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+            "X-Apple-I-Locale": "en_US",
+            "X-Apple-I-TimeZone": "UTC",
+            "X-Apple-I-TimeZone-Offset": "0",
+            "X-MMe-Country": "US",
+            "X-Apple-Requested-Partition": "0",
+            "X-Apple-I-Device-Configuration-Mode": "0",
+            "X-Apple-I-DeviceUserMode": "0",
+            "X-Apple-Security-Upgrade-Context": "com.apple.authkit.generic",
+            "X-Apple-I-CDP-Status": "false",
+            "X-Apple-I-CDP-Circle-Status": "false",
+            "X-Apple-I-OT-Status": "false",
+            "X-Apple-I-ICSCREC": "true",
+            "X-Apple-I-PRK-Gen": "true",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "X-Apple-I-CFU-State": TWO_FACTOR_CFU_STATE,
             "X-Apple-I-MD-M": data.machine_id,
             "X-Apple-I-MD": data.one_time_password,
             "X-Apple-I-MD-LU": data.local_user_id,
             "X-Apple-I-MD-RINFO": str(data.routing_info),
             "X-Mme-Device-Id": data.device_unique_id,
-            "X-MMe-Client-Info": data.device_description,
-            "X-Apple-I-Client-Time": data.client_time,
-            "X-Apple-Locale": data.locale,
-            "X-Apple-I-TimeZone": data.timezone,
-            "Connection": "close",
         }
 
     # ---------------------------------------------------------- plumbing
