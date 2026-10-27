@@ -9,7 +9,9 @@ Ownership: shared (GLUE agent). Command ownership:
     auth login/logout/status   calls apple.auth + keychain (AUTH modules)
     devices                    calls device.usbmux (DEVICE)
     apps                       calls device.installer (DEVICE)
-    sign                       calls apple.developer + signing.* (SIGN)
+    sign                       calls apple.developer + signing.* (SIGN);
+                               with --p12 + --profile it runs the
+                               certificate pipeline (signing.certificate)
     install                    calls sign pipeline + device.installer
     uninstall                  calls device.installer (DEVICE)
     doctor                     calls device.* + config (DEVICE + GLUE)
@@ -46,6 +48,7 @@ from sideload.models import (
     SigningIdentity,
     Team,
 )
+from sideload.signing import certificate as certificate_mod
 from sideload.signing import csr as csr_mod
 from sideload.signing import entitlements as entitlements_mod
 from sideload.signing import ipa as ipa_mod
@@ -138,6 +141,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail instead of dropping entitlements the profile does not grant",
     )
+    sign.add_argument(
+        "--p12",
+        metavar="PATH",
+        help="sign with an existing developer certificate (.p12) instead of an Apple ID session",
+    )
+    sign.add_argument(
+        "--profile",
+        metavar="PATH",
+        help="the .mobileprovision to sign with (required together with --p12)",
+    )
 
     install_parser = subparsers.add_parser(
         "install", parents=[common], help="sign an IPA and install it over USB"
@@ -153,6 +166,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-entitlements",
         action="store_true",
         help="fail instead of dropping entitlements the profile does not grant",
+    )
+    install_parser.add_argument(
+        "--p12",
+        metavar="PATH",
+        help="sign with an existing developer certificate (.p12) instead of an Apple ID session",
+    )
+    install_parser.add_argument(
+        "--profile",
+        metavar="PATH",
+        help="the .mobileprovision to sign with (required together with --p12)",
     )
 
     uninstall = subparsers.add_parser(
@@ -331,7 +354,7 @@ def _package_p12(
     state directory, so the bytes go straight into a 0600 temp file.
     """
     from cryptography import x509
-    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, rsa
     from cryptography.hazmat.primitives.serialization import pkcs12
 
@@ -342,12 +365,23 @@ def _package_p12(
             "the generated private key is not usable for code signing"
         )
     password = secrets.token_urlsafe(18)
+    # "security import" (SecKeychainItemImport) rejects the modern p12
+    # wrapping (AES plus a SHA-256 MAC) with "MAC verification failed";
+    # only the legacy wrapping imports (verified live), so the p12 that
+    # bridges our own serialization to the Keychain uses it.
+    encryption = (
+        serialization.PrivateFormat.PKCS12.encryption_builder()
+        .kdf_rounds(50000)
+        .key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESCBC)
+        .hmac_hash(hashes.SHA1())
+        .build(password.encode("utf-8"))
+    )
     data = pkcs12.serialize_key_and_certificates(
         name=b"sideload",
         key=key,
         cert=certificate,
         cas=None,
-        encryption_algorithm=serialization.BestAvailableEncryption(password.encode("utf-8")),
+        encryption_algorithm=encryption,
     )
     config_mod.ensure_dirs(paths)
     for stale in paths.cache_dir.glob("identity-*.p12"):
@@ -567,19 +601,6 @@ class _SignOutcome:
     session: AppleSession
     paths: config_mod.AppPaths
     cache: cache_mod.ResourceCache
-
-
-def _child_bundle_id(
-    original_main: str, resigned_main: str, child_original: str
-) -> str:
-    """Derive an extension bundle id under the resigned parent id."""
-    if child_original == original_main:
-        suffix = ".extension"
-    elif child_original.startswith(original_main + "."):
-        suffix = child_original[len(original_main) :]
-    else:
-        suffix = "." + (child_original.rsplit(".", 1)[-1] or "extension")
-    return resigned_main + suffix
 
 
 def _profile_covers(
@@ -826,7 +847,7 @@ def _sign_pipeline(
     for app_bundle in bundles:
         if app_bundle is bundle.main_bundle or app_bundle.kind != ".appex":
             continue
-        child_id = _child_bundle_id(
+        child_id = ipa_mod.child_bundle_id(
             original_bundle_id, resigned_bundle_id, app_bundle.bundle_identifier
         )
         app_bundle.set_bundle_identifier(child_id)
@@ -902,17 +923,53 @@ def _sign_pipeline(
     )
 
 
-def cmd_sign(args: argparse.Namespace) -> int:
-    """Full sign pipeline: login check, team, App ID, CSR, profile,
-    entitlement merge, nested re-sign, repack.
+def _certificate_signing_requested(args: argparse.Namespace) -> bool:
+    """True when --p12 or --profile was passed; the pair is validated
+    together in _run_certificate_sign."""
+    return bool(getattr(args, "p12", None)) or bool(getattr(args, "profile", None))
+
+
+def _run_certificate_sign(
+    args: argparse.Namespace, *, udid: str | None
+) -> certificate_mod.CertificateSignOutcome:
+    """Sign with an existing developer certificate and provisioning
+    profile (signing/certificate.py). No Apple ID login, no developer
+    API call, no anisette, and no Keychain session happens anywhere in
+    this path; the p12 passphrase is read with getpass.
     """
-    _sign_pipeline(args, udid=None, device_name=None)
-    return 0
+    p12_value = getattr(args, "p12", None)
+    profile_value = getattr(args, "profile", None)
+    if not p12_value or not profile_value:
+        missing = "--profile" if p12_value else "--p12"
+        raise errors.UsageError(
+            "--p12 and --profile must be passed together",
+            hint=f"pass {missing} as well, or drop both to sign with an Apple ID session",
+        )
+    ipa_path = Path(args.ipa).expanduser()
+    output = (
+        Path(str(getattr(args, "output", None))).expanduser()
+        if getattr(args, "output", None)
+        else _default_output(ipa_path)
+    )
+    return certificate_mod.sign_with_certificate(
+        ipa_path=ipa_path,
+        p12_path=Path(str(p12_value)).expanduser(),
+        profile_path=Path(str(profile_value)).expanduser(),
+        output_path=output,
+        udid=udid,
+        bundle_id_override=getattr(args, "bundle_id", None),
+        team_override=getattr(args, "team", None),
+        strict_entitlements=bool(getattr(args, "strict_entitlements", False)),
+    )
 
 
-def cmd_install(args: argparse.Namespace) -> int:
-    """Sign then install; the acceptance path of the whole tool."""
-    _load_session()  # exit 3 before touching the device or Apple
+def _prepare_install_device(
+    args: argparse.Namespace,
+) -> tuple[usbmux_mod.LibimobiledeviceTransport, str, str | None]:
+    """Resolve the install target and assert pairing and Developer Mode.
+    No Apple or Keychain access happens here, so the certificate path
+    shares this step without any Apple ID side effect.
+    """
     transport = usbmux_mod.LibimobiledeviceTransport()
     udid = _resolve_udid(args, transport)
     if not transport.is_paired(udid):
@@ -934,10 +991,17 @@ def cmd_install(args: argparse.Namespace) -> int:
         device_name = transport.read_device(udid).name
     except errors.SideloadError:
         device_name = None
+    return transport, udid, device_name
 
-    outcome = _sign_pipeline(args, udid=udid, device_name=device_name)
-    profile_mod.assert_profile_usable(outcome.profile, udid, outcome.resigned_bundle_id)
 
+def _install_signed_ipa(
+    transport: usbmux_mod.LibimobiledeviceTransport,
+    udid: str,
+    output_ipa: str,
+    bundle_id: str,
+) -> None:
+    """Drive installation_proxy with the pinned progress printing and
+    the doctor hint on signature failures."""
     client = installer_mod.DeviceAppClient(transport)
 
     def _progress(stage: str, percent: int | None) -> None:
@@ -945,29 +1009,90 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"  {stage}{suffix}")
 
     try:
-        client.install(
-            udid,
-            outcome.output_ipa,
-            _progress,
-            bundle_id=outcome.resigned_bundle_id,
-        )
+        client.install(udid, output_ipa, _progress, bundle_id=bundle_id)
     except errors.InstallError as exc:
         if exc.install_error_name in _SIGNATURE_FAILURE_NAMES:
             print("run: sideload doctor --follow-logs to see the underlying amfid or installd reason")
         raise
 
+
+def _finish_install(
+    udid: str,
+    *,
+    original_bundle_id: str,
+    resigned_bundle_id: str,
+    app_id_identifier: str,
+    profile_uuid: str,
+    dsid: str,
+) -> None:
+    """Record the install for doctor and refreshes, remember the
+    default device, and print the closing line."""
     record = InstallRecord(
+        original_bundle_id=original_bundle_id,
+        resigned_bundle_id=resigned_bundle_id,
+        app_id_identifier=app_id_identifier,
+        profile_uuid=profile_uuid,
+        dsid=dsid,
+        udid=udid,
+        installed_at=datetime.now(UTC),
+    )
+    paths, _settings = _ensure_state()
+    cache_mod.ResourceCache(paths).record_install(record)
+    _remember_default_device(udid)
+    print(f"installed: {resigned_bundle_id}")
+
+
+def cmd_sign(args: argparse.Namespace) -> int:
+    """Full sign pipeline: login check, team, App ID, CSR, profile,
+    entitlement merge, nested re-sign, repack. With --p12 and --profile
+    the certificate pipeline runs instead: no Apple account is needed
+    or contacted.
+    """
+    if _certificate_signing_requested(args):
+        _run_certificate_sign(args, udid=None)
+        return 0
+    _sign_pipeline(args, udid=None, device_name=None)
+    return 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Sign then install; the acceptance path of the whole tool. With
+    --p12 and --profile the signing step is the certificate pipeline
+    and no Apple ID session is required or used.
+    """
+    if _certificate_signing_requested(args):
+        transport, udid, _device_name = _prepare_install_device(args)
+        cert_outcome = _run_certificate_sign(args, udid=udid)
+        _install_signed_ipa(
+            transport, udid, cert_outcome.output_ipa, cert_outcome.signed_bundle_id
+        )
+        _finish_install(
+            udid,
+            original_bundle_id=cert_outcome.original_bundle_id,
+            resigned_bundle_id=cert_outcome.signed_bundle_id,
+            # No App ID exists in the certificate path; the profile
+            # UUID is the closest analog for the install record.
+            app_id_identifier=cert_outcome.profile.uuid,
+            profile_uuid=cert_outcome.profile.uuid,
+            dsid=cert_outcome.profile.team_identifier,
+        )
+        return 0
+
+    _load_session()  # exit 3 before touching the device or Apple
+    transport, udid, device_name = _prepare_install_device(args)
+    outcome = _sign_pipeline(args, udid=udid, device_name=device_name)
+    profile_mod.assert_profile_usable(outcome.profile, udid, outcome.resigned_bundle_id)
+    _install_signed_ipa(
+        transport, udid, outcome.output_ipa, outcome.resigned_bundle_id
+    )
+    _finish_install(
+        udid,
         original_bundle_id=outcome.original_bundle_id,
         resigned_bundle_id=outcome.resigned_bundle_id,
         app_id_identifier=outcome.app_id.identifier,
         profile_uuid=outcome.profile.uuid,
         dsid=outcome.session.dsid,
-        udid=udid,
-        installed_at=datetime.now(UTC),
     )
-    outcome.cache.record_install(record)
-    _remember_default_device(udid)
-    print(f"installed: {outcome.resigned_bundle_id}")
     return 0
 
 

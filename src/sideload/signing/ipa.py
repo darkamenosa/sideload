@@ -633,6 +633,25 @@ def resign_bundle_id(
     return f"{original_bundle_id}.{team_identifier.lower()}"
 
 
+def child_bundle_id(
+    original_main: str, resigned_main: str, child_original: str
+) -> str:
+    """Derive one child bundle id under the resigned parent id.
+
+    Shared by both signing pipelines (Apple ID and certificate): the
+    child keeps the trailing labels it had under the original parent, a
+    child equal to the parent id (a mislabeled bundle) is suffixed
+    ".extension", and an unrelated child id keeps only its last label.
+    """
+    if child_original == original_main:
+        suffix = ".extension"
+    elif child_original.startswith(original_main + "."):
+        suffix = child_original[len(original_main) :]
+    else:
+        suffix = "." + (child_original.rsplit(".", 1)[-1] or "extension")
+    return resigned_main + suffix
+
+
 def repack_ipa(bundle: IPABundle, output_path: Path) -> Path:
     """Zip the prepared Payload back into an installable IPA.
 
