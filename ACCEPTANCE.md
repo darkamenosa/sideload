@@ -84,6 +84,43 @@ build_parser(). Exit codes: 0 success, 1 failure, 2 usage error,
 - With --yes: uninstalls and removes the app data, prints the removed
   bundle id, exit 0.
 
+### sideload refresh [--udid UDID] [--all]
+
+- Re-signs and reinstalls the apps recorded in the install cache before
+  the 7 day free profile expires, reusing the cached certificate, App
+  ID, and profile, and downloading a fresh profile only when needed.
+- Target device: --udid, else the remembered default device, else the
+  sole device with install records. --all targets every device with
+  install records. --all together with --udid exits 2.
+- Never prompts: no password, no 2FA code, no Trust dialog.
+- Missing, expired, or Apple rejected session: exit 3 with "run:
+  sideload auth login" before any further Apple call.
+- A device that is not connected, not paired, or has Developer Mode off
+  is skipped with a message; the run does not fail unless nothing could
+  be refreshed. Records whose source IPA is missing (or was never
+  recorded) are reported and kept, never deleted.
+- Prints one line per app plus a summary count line. Exit 0 when every
+  attempted app was refreshed, 1 when any app failed or nothing could
+  be refreshed.
+
+### sideload daemon install|uninstall|status
+
+- install writes ~/Library/LaunchAgents/dev.sideload.refresh.plist (0600
+  file; 0700 directory when it is created here) with ProgramArguments
+  running the current interpreter with "-m sideload refresh --all", a
+  daily StartInterval, RunAtLoad false, and stdout and stderr both into
+  ~/Library/Application Support/sideload/logs/refresh.log. It then loads
+  the agent with "launchctl bootstrap gui/<uid>", falling back to the
+  legacy "launchctl load", and prints the plist path and how to remove
+  it.
+- uninstall boots the agent out and removes the plist; it is idempotent
+  and exits 0 when nothing was installed.
+- status prints whether the plist exists, whether launchctl lists the
+  agent, and the log path; it exits 0 either way.
+- The agent depends on a valid Keychain session and can never prompt:
+  session expiry shows up as exit 3 lines in the refresh log, and the
+  log itself never contains tokens or passwords.
+
 ### sideload doctor [--udid UDID] [--follow-logs]
 
 - Prints a health report: each required tool found or missing,

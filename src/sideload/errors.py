@@ -286,3 +286,14 @@ class UninstallConfirmationRequired(SideloadError):
     @property
     def exit_code(self) -> int:
         return EXIT_USAGE
+
+
+# ---------------------------------------------------------------- daemon
+
+class DaemonError(SideloadError):
+    """The refresh launchd agent could not be installed or controlled.
+
+    For example launchctl refused to bootstrap the plist. The refresh
+    command itself never raises this; only "sideload daemon" plumbing
+    does.
+    """
