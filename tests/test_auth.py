@@ -1061,3 +1061,35 @@ def test_parse_plist_accepts_openstep_ascii() -> None:
     assert parsed["adsid"] == "X"
     assert parsed["GsIdmsToken"] == "Y"
     assert parsed["sk"] == b"\x00\xff"
+
+
+def _openstep_plist(value: object) -> bytes:
+    if isinstance(value, dict):
+        items = []
+        for key, item in value.items():
+            safe_key = str(key) if str(key).replace("_", "").isalnum() else f'"{key}"'
+            items.append(f"{safe_key} = {_openstep_plist(item).decode('utf-8')};")
+        return ("{ " + " ".join(items) + " }").encode()
+    if isinstance(value, bytes):
+        return f"<{value.hex()}>".encode("ascii")
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'.encode()
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value).encode("ascii")
+    raise TypeError(f"unsupported OpenStep value: {type(value).__name__}")
+
+
+def test_full_login_accepts_openstep_ascii_spd(monkeypatch) -> None:
+    original_dumps = plistlib.dumps
+
+    def dumps(value, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(value, dict) and "GsIdmsToken" in value:
+            return _openstep_plist(value)
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(plistlib, "dumps", dumps)
+    server = MockGrandSlamServer()
+    _, session = server.authenticate()
+    assert session.dsid == ADSID
+    assert session.gs_token == GS_TOKEN
