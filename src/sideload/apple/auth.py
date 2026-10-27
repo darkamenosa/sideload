@@ -94,6 +94,7 @@ import hmac
 import plistlib
 import secrets
 import struct
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -326,13 +327,44 @@ def _app_tokens_checksum(sk: bytes, adsid: str, apps: Sequence[str]) -> bytes:
 
 
 def _parse_plist(data: bytes, context: str) -> dict[str, object]:
+    parsed: object
     try:
         parsed = plistlib.loads(data)
-    except (plistlib.InvalidFileException, ValueError) as exc:
-        raise AuthError(f"Apple's Grand Slam {context} is not a valid plist.") from exc
+    except (plistlib.InvalidFileException, ValueError):
+        parsed = _parse_plist_via_plutil(data)
+        if parsed is None:
+            raise AuthError(
+                f"Apple's Grand Slam {context} is not a valid plist "
+                f"(length {len(data)}, starts with {data[:8]!r})."
+            ) from None
     if not isinstance(parsed, dict):
         raise AuthError(f"Apple's Grand Slam {context} is not a plist dictionary.")
     return parsed
+
+
+def _parse_plist_via_plutil(data: bytes) -> dict[str, object] | None:
+    """Parse old style OpenStep ASCII plists that plistlib rejects.
+
+    Apple's decrypted GSA login blob is not always XML or binary; the
+    system plutil understands the OpenStep form and converts it to XML.
+    """
+    try:
+        result = subprocess.run(
+            ["/usr/bin/plutil", "-convert", "xml1", "-o", "-", "--", "-"],
+            input=data,
+            capture_output=True,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        parsed = plistlib.loads(result.stdout)
+    except (plistlib.InvalidFileException, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _plist_bytes(container: Mapping[str, object], key: str, context: str) -> bytes:

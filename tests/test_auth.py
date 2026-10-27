@@ -1051,3 +1051,13 @@ def test_security_code_rate_limit_has_wait_hint() -> None:
     with pytest.raises(AuthError) as excinfo:
         client._validate_security_code("adsid", "token", "123456")
     assert "wait 30 to 60 minutes" in (excinfo.value.hint or "")
+
+
+def test_parse_plist_accepts_openstep_ascii() -> None:
+    parsed = auth_module._parse_plist(
+        b'{ adsid = "X"; GsIdmsToken = "Y"; sk = <00ff>; }',
+        "login response",
+    )
+    assert parsed["adsid"] == "X"
+    assert parsed["GsIdmsToken"] == "Y"
+    assert parsed["sk"] == b"\x00\xff"
