@@ -384,13 +384,27 @@ def _app_bundle(root: Path) -> AppBundle:
     executable_name = plist.get("CFBundleExecutable")
     if not isinstance(executable_name, str) or not executable_name:
         raise IPAError(f"bundle {root} Info.plist has no CFBundleExecutable")
+    if (
+        executable_name in {".", ".."}
+        or "/" in executable_name
+        or "\\" in executable_name
+        or PurePosixPath(executable_name).is_absolute()
+    ):
+        raise IPAError(
+            f"bundle {root} has an unsafe CFBundleExecutable: {executable_name!r}"
+        )
+    executable = root / executable_name
+    if not executable.resolve().is_relative_to(root.resolve()):
+        raise IPAError(
+            f"bundle {root} has a CFBundleExecutable outside the bundle: {executable_name!r}"
+        )
     bundle_identifier = plist.get("CFBundleIdentifier")
     return AppBundle(
         root=root,
         bundle_identifier=(
             bundle_identifier if isinstance(bundle_identifier, str) else ""
         ),
-        executable=root / executable_name,
+        executable=executable,
         info_plist_path=info_plist_path,
     )
 
@@ -442,7 +456,10 @@ def extract_ipa(ipa_path: Path, dest_dir: Path | None = None) -> IPABundle:
             raise NotAnIPAError(
                 f"{ipa_path} has no Payload directory", hint=_NOT_AN_IPA_HINT
             )
-        _extract_archive(archive, work_dir)
+        try:
+            _extract_archive(archive, work_dir)
+        except zipfile.BadZipFile as exc:
+            raise IPAError(f"the IPA archive is malformed: {exc}") from exc
     if (work_dir / "Watch").is_dir():
         raise UnsupportedIPAError(
             "watchOS companion apps are not supported by this signing flow",
@@ -465,7 +482,20 @@ def extract_ipa(ipa_path: Path, dest_dir: Path | None = None) -> IPABundle:
             f"{ipa_path} has no .app bundle inside Payload", hint=_NOT_AN_IPA_HINT
         )
     main_bundle = _app_bundle(app_dirs[0])
+    if (main_bundle.root / "Watch").is_dir():
+        raise UnsupportedIPAError(
+            "watchOS companion apps are not supported by this signing flow",
+            hint="remove the Watch directory from the app and sign the iPhone app only",
+        )
     all_bundles = [main_bundle, *main_bundle.nested_bundles()]
+    if any(
+        "Watch" in bundle.root.relative_to(main_bundle.root).parts
+        for bundle in all_bundles[1:]
+    ):
+        raise UnsupportedIPAError(
+            "watchOS companion apps are not supported by this signing flow",
+            hint="remove the Watch directory from the app and sign the iPhone app only",
+        )
     for bundle in all_bundles:
         if _is_fairplay_encrypted(bundle.executable):
             raise UnsupportedIPAError(
@@ -535,6 +565,8 @@ def _extract_archive(archive: zipfile.ZipFile, dest_dir: Path) -> None:
         _assert_contained(root, target)
         raw_mode = info.external_attr >> 16
         if info.is_dir():
+            if target.exists() and not target.is_dir():
+                raise IPAError(f"archive contains conflicting duplicate entry: {name}")
             target.mkdir(parents=True, exist_ok=True)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -549,6 +581,8 @@ def _extract_archive(archive: zipfile.ZipFile, dest_dir: Path) -> None:
             continue
         if target.is_symlink():
             target.unlink()
+        elif target.is_dir():
+            raise IPAError(f"archive contains conflicting duplicate entry: {name}")
         with archive.open(info) as source, open(target, "wb") as handle:
             shutil.copyfileobj(source, handle, length=1 << 20)
         permissions = stat.S_IMODE(raw_mode) & 0o777

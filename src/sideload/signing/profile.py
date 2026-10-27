@@ -197,7 +197,7 @@ def profile_expiration(profile: ProvisioningProfile) -> datetime:
 
 def assert_profile_usable(
     profile: ProvisioningProfile,
-    udid: str,
+    udid: str | None,
     bundle_id: str,
     now: datetime | None = None,
 ) -> None:
@@ -226,7 +226,7 @@ def assert_profile_usable(
             "expire 7 days after issuance)",
         )
 
-    if udid not in profile.device_ids and not any(
+    if udid is not None and udid not in profile.device_ids and not any(
         _normalize_udid(udid) == _normalize_udid(device)
         for device in profile.device_ids
     ):

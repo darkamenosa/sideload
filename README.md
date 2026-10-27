@@ -40,6 +40,14 @@ ACCEPTANCE.md for the exact command contract.
   are stripped, and the work directory is removed on exit.
 - Apple requests refuse redirects, and TLS verification is never
   disabled.
+- TLS verification uses the macOS system trust store, because certifi
+  no longer carries Apple's current root. That store also honors roots
+  you installed, such as mkcert or mitmproxy, so do not run a login
+  while a TLS interception proxy is active.
+- The Keychain gates other users and prompts other apps, but a process
+  running as the same user can invoke /usr/bin/security and
+  /usr/bin/codesign without an extra prompt. This is the same model
+  Sideloadly and ipatool use.
 - `uninstall` requires --yes; nothing is deleted without it.
 
 ## Prerequisites

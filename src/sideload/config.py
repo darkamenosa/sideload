@@ -9,7 +9,7 @@ Layout:
     <app_dir>/accounts/<dsid>/devices.json    cached team devices
     <app_dir>/accounts/<dsid>/profiles/<uuid>.mobileprovision
     <app_dir>/installs/<udid>.json             per device install records
-    <app_dir>/logs/                            rotating command logs
+    <app_dir>/logs/                            reserved, v1 writes no log
 
 Ownership: shared (GLUE agent).
 """

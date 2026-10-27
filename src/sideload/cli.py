@@ -636,6 +636,7 @@ def _ensure_app_id(
         raise
     print(f"app id: created ({bundle_id})")
     app_ids.append(record)
+    cache.save_app_ids(dsid, app_ids)
     return record
 
 
@@ -672,6 +673,7 @@ def _profile_for_bundle(
                 "sideload auth login --rotate-certificate to issue a new one"
             ),
         )
+    profile_mod.assert_profile_usable(profile, udid, bundle_id)
     return profile
 
 
@@ -710,6 +712,14 @@ def _sign_pipeline(
     machine_name = csr_mod.make_machine_name()
     identity_certificate_der: bytes | None = None
     identity = store.find_identity(team.identifier)
+    if identity is not None and settings.rotate_certificate:
+        # An explicit rotation must replace the identity even when one is
+        # already present; otherwise a revoked certificate is reused on
+        # every run and the flag never clears.
+        print("certificate: rotating the local identity")
+        if identity.keychain_identity is not None:
+            store.delete_identity(identity.keychain_identity)
+        identity = None
     if identity is not None:
         print("certificate: reused from the Keychain")
         if identity.keychain_identity is not None:
@@ -744,7 +754,7 @@ def _sign_pipeline(
         p12_path, p12_password = _package_p12(certificate.certificate_pem, private_key_pem, paths)
         try:
             identity_name = store.import_identity(
-                str(p12_path), p12_password, keychain_mod.SERVICE_IDENTITY_NOTE
+                str(p12_path), p12_password, team.identifier
             )
         finally:
             p12_path.unlink(missing_ok=True)
@@ -790,6 +800,9 @@ def _sign_pipeline(
     bundles = list(getattr(bundle, "all_bundles", []) or [])
     if bundle.main_bundle not in bundles:
         bundles.insert(0, bundle.main_bundle)
+
+    for app_bundle in bundles:
+        app_bundle.remove_appstore_artifacts()
 
     main_profile = _profile_for_bundle(
         developer,

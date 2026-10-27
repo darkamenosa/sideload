@@ -288,6 +288,7 @@ class DeviceAppClient:
                     match.group("name"),
                     match.group("description"),
                     operation,
+                    match.group("code"),
                 )
             match = _LEGACY_ERROR_LINE.match(line)
             if match is not None:
@@ -303,10 +304,11 @@ class DeviceAppClient:
         error_name: str,
         description: str | None,
         operation: str,
+        code: str | None = None,
     ) -> InstallError:
         hint = INSTALL_ERROR_HINTS.get(error_name, INSTALL_ERROR_HINTS["UnknownError"])
         lowered = (description or "").lower()
-        if "maximum number of apps" in lowered or "0xe8008021" in lowered:
+        if (code or "").lower() == "0xe8008021" or "maximum number of apps" in lowered:
             hint = (
                 "Free Apple accounts can have three sideloaded apps at a time. "
                 "Uninstall one with: sideload uninstall <bundle-id> --yes, "

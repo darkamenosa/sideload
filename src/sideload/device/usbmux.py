@@ -35,7 +35,7 @@ import time
 from collections.abc import Sequence
 
 from sideload import config
-from sideload.errors import DeviceError, NoDeviceFoundError, TransportError
+from sideload.errors import DeviceError, NoDeviceFoundError, PairingError, TransportError
 from sideload.models import IOSDevice
 
 # lockdown query domain and key for the iOS 16+ developer mode flag.
@@ -181,6 +181,11 @@ class LibimobiledeviceTransport:
             raise NoDeviceFoundError(
                 f"no USB device with UDID {udid}",
                 hint="plug the device in over USB and unlock it",
+            )
+        if "passcode" in detail.lower():
+            raise PairingError(
+                f"device {udid} is locked",
+                hint="unlock the iPhone, then run the command again",
             )
         return False
 

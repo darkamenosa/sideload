@@ -463,6 +463,35 @@ class _LoginState:
     first_name: str
     last_name: str
     needs_two_factor: bool
+    code_already_pushed: bool = False
+
+
+def _two_factor_requirement(status: object) -> tuple[bool, bool]:
+    """(needs 2FA, Apple already pushed the code) from the Status dict.
+
+    Apple sometimes answers complete with hsc 409 and no au when it has
+    already pushed a code; treating that as trusted skips 2FA and makes
+    apptokens fail with -22411.
+    """
+    au = ""
+    hsc = 0
+    if isinstance(status, dict):
+        au_value: object = status.get("au")
+        au = au_value if isinstance(au_value, str) else ""
+        hsc_value: object = status.get("hsc")
+        if isinstance(hsc_value, int) and not isinstance(hsc_value, bool):
+            hsc = hsc_value
+        elif isinstance(hsc_value, str) and hsc_value.isdigit():
+            hsc = int(hsc_value)
+    if au == "trustedDeviceSecondaryAuth":
+        return True, False
+    if au == "" and hsc == 409:
+        return True, True
+    if au == "":
+        return False, False
+    raise AuthError(
+        f"Apple requires an authentication step sideload does not support: {au}"
+    )
 
 
 class GrandSlamClient:
@@ -503,7 +532,8 @@ class GrandSlamClient:
             login = self._login_round(email, password)
             if not login.needs_two_factor:
                 return self._request_app_session(email, login)
-            self._request_two_factor_push(login.adsid, login.idms_token)
+            if not login.code_already_pushed:
+                self._request_two_factor_push(login.adsid, login.idms_token)
             validated = False
             while attempts_used < MAX_TWO_FACTOR_ATTEMPTS:
                 code = security_code_provider()
@@ -578,19 +608,9 @@ class GrandSlamClient:
         first_name = login_plist.get("fn")
         last_name = login_plist.get("ln")
 
-        status: object = complete_response.get("Status")
-        au = ""
-        if isinstance(status, dict):
-            au_value: object = status.get("au")
-            au = au_value if isinstance(au_value, str) else ""
-        if au == "trustedDeviceSecondaryAuth":
-            needs_two_factor = True
-        elif au == "":
-            needs_two_factor = False
-        else:
-            raise AuthError(
-                f"Apple requires an authentication step sideload does not support: {au}"
-            )
+        needs_two_factor, code_already_pushed = _two_factor_requirement(
+            complete_response.get("Status")
+        )
 
         return _LoginState(
             adsid=adsid,
@@ -600,6 +620,7 @@ class GrandSlamClient:
             first_name=first_name if isinstance(first_name, str) else "",
             last_name=last_name if isinstance(last_name, str) else "",
             needs_two_factor=needs_two_factor,
+            code_already_pushed=code_already_pushed,
         )
 
     def _request_app_session(self, email: str, login: _LoginState) -> AppleSession:
@@ -641,10 +662,28 @@ class GrandSlamClient:
 
     # ---------------------------------------------------------- 2FA
 
+    @staticmethod
+    def _raise_for_http(response: requests.Response, context: str) -> None:
+        """Fail fast with an actionable hint on rate limits and 5xx."""
+        if response.status_code == 429:
+            raise AuthError(
+                "Apple is rate limiting sign in attempts from this network.",
+                hint=(
+                    "wait 30 to 60 minutes, then try once; every retry now "
+                    "extends the block"
+                ),
+            )
+        if response.status_code >= 500:
+            raise AuthError(
+                f"Apple's {context} failed with HTTP {response.status_code}.",
+                hint="Apple returned a temporary server error; wait a minute and try once",
+            )
+
     def _request_two_factor_push(self, adsid: str, idms_token: str) -> None:
         """GET /auth/verify/trusteddevice to push a code to trusted devices."""
         headers = self._two_factor_headers(adsid, idms_token)
         response = self._get(GSA_TWO_FACTOR_TRIGGER_URL, headers)
+        self._raise_for_http(response, "trusted device code push")
         if not 200 <= response.status_code < 300:
             raise AuthError(
                 f"Apple's trusted device code push failed with HTTP {response.status_code}."
@@ -659,6 +698,7 @@ class GrandSlamClient:
         headers = self._two_factor_headers(adsid, idms_token)
         headers["security-code"] = code
         response = self._get(GSA_TWO_FACTOR_VALIDATE_URL, headers)
+        self._raise_for_http(response, "security code validation")
         if response.status_code == 204:
             return True
         if response.status_code != 200:
@@ -696,6 +736,7 @@ class GrandSlamClient:
             "X-Apple-I-Client-Time": data.client_time,
             "X-Apple-Locale": data.locale,
             "X-Apple-I-TimeZone": data.timezone,
+            "Connection": "close",
         }
 
     # ---------------------------------------------------------- plumbing
@@ -717,6 +758,9 @@ class GrandSlamClient:
             "X-MMe-Client-Info": data.device_description,
             "Accept": "*/*",
             "User-Agent": GSA_USER_AGENT,
+            # Apple's edge allows two requests per connection and answers
+            # the third with HTML 503; never reuse the connection.
+            "Connection": "close",
         }
 
     def _post_plist(

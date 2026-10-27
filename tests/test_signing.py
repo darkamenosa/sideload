@@ -1696,3 +1696,51 @@ def test_extract_rejects_watchos_companion(tmp_path):
         )
     with pytest.raises(errors.UnsupportedIPAError, match="watchOS"):
         ipa.extract_ipa(archive_path, dest_dir=tmp_path / "work")
+
+
+def _conflict_archive(path, dir_first):
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("Payload/App.app/Info.plist", _info_plist("com.conflict", "Conflict"))
+        if dir_first:
+            archive.writestr("Payload/App.app/Conflict/", b"")
+            archive.writestr("Payload/App.app/Conflict", b"file")
+        else:
+            archive.writestr("Payload/App.app/Conflict", b"file")
+            archive.writestr("Payload/App.app/Conflict/", b"")
+
+
+def test_extract_rejects_dir_then_file_conflict(tmp_path):
+    archive_path = tmp_path / "conflict1.ipa"
+    _conflict_archive(archive_path, True)
+    with pytest.raises(errors.IPAError, match="conflicting duplicate"):
+        ipa.extract_ipa(archive_path, dest_dir=tmp_path / "work")
+
+
+def test_extract_rejects_file_then_dir_conflict(tmp_path):
+    archive_path = tmp_path / "conflict2.ipa"
+    _conflict_archive(archive_path, False)
+    with pytest.raises(errors.IPAError, match="conflicting duplicate"):
+        ipa.extract_ipa(archive_path, dest_dir=tmp_path / "work")
+
+
+def test_extract_rejects_executable_traversal(tmp_path):
+    archive_path = tmp_path / "trav.ipa"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "Payload/App.app/Info.plist",
+            _info_plist("com.trav", "../../../outside"),
+        )
+    with pytest.raises(errors.IPAError, match="unsafe CFBundleExecutable"):
+        ipa.extract_ipa(archive_path, dest_dir=tmp_path / "work")
+
+
+def test_extract_rejects_watch_inside_the_app(tmp_path):
+    archive_path = tmp_path / "watchapp.ipa"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("Payload/App.app/Info.plist", _info_plist("com.watch2", "Watch2"))
+        archive.writestr(
+            "Payload/App.app/Watch/Ext.app/Info.plist",
+            _info_plist("com.watch2.ext", "Ext"),
+        )
+    with pytest.raises(errors.UnsupportedIPAError, match="watchOS"):
+        ipa.extract_ipa(archive_path, dest_dir=tmp_path / "work")

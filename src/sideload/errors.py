@@ -282,3 +282,7 @@ class UninstallConfirmationRequired(SideloadError):
     Uninstalling removes app data; the CLI refuses to run it without
     confirmation and never prompts interactively on its own.
     """
+
+    @property
+    def exit_code(self) -> int:
+        return EXIT_USAGE

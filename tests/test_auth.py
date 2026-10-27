@@ -991,3 +991,63 @@ def test_security_code_204_counts_as_success() -> None:
     client = GrandSlamClient(FakeAnisetteProvider())
     client.http = NoContentSession()  # type: ignore[assignment]
     assert client._validate_security_code("adsid", "token", "123456") is True
+
+
+def test_find_identity_ignores_developer_id_certificates() -> None:
+    runner = FakeSecurityRunner()
+    runner.identities = {
+        "Developer ID Application: Example Developer (AB12CD34EF)",
+        "Apple Development: user@example.com (AB12CD34EF)",
+    }
+    store = make_store(runner)
+    identity = store.find_identity("AB12CD34EF")
+    assert identity is not None
+    assert identity.keychain_identity is not None
+    assert identity.keychain_identity.startswith("Apple Development:")
+
+
+def test_import_identity_resolves_same_common_name_with_team_note() -> None:
+    runner = FakeSecurityRunner()
+    runner.identities = {"Apple Development: user@example.com (AB12CD34EF)"}
+    store = make_store(runner)
+    name = store.import_identity("/tmp/does-not-matter.p12", "pass", "AB12CD34EF")
+    assert name == "Apple Development: user@example.com (AB12CD34EF)"
+
+
+def test_gsa_headers_disable_connection_reuse() -> None:
+    client = GrandSlamClient(FakeAnisetteProvider())
+    data = client.anisette.get_anisette()
+    assert client._gsa_headers(data)["Connection"] == "close"
+    assert client._two_factor_headers("adsid", "token")["Connection"] == "close"
+
+
+def test_hsc_409_marks_two_factor_already_pushed() -> None:
+    assert auth_module._two_factor_requirement({"hsc": 409}) == (True, True)
+    assert auth_module._two_factor_requirement({"au": "trustedDeviceSecondaryAuth"}) == (True, False)
+    assert auth_module._two_factor_requirement({}) == (False, False)
+
+
+def test_locale_keyword_suffix_is_stripped() -> None:
+    class Locale:
+        def localeIdentifier(self) -> str:
+            return "en_US@rg=skzzzz"
+
+    class Device:
+        def locale(self) -> Locale:
+            return Locale()
+
+    assert AnisetteProvider()._locale(Device()) == "en_US"
+
+
+def test_security_code_rate_limit_has_wait_hint() -> None:
+    class LimitedSession:
+        def get(  # type: ignore[no-untyped-def]
+            self, url, headers=None, timeout=None, allow_redirects=True
+        ):
+            return _response(b"", status=429)
+
+    client = GrandSlamClient(FakeAnisetteProvider())
+    client.http = LimitedSession()  # type: ignore[assignment]
+    with pytest.raises(AuthError) as excinfo:
+        client._validate_security_code("adsid", "token", "123456")
+    assert "wait 30 to 60 minutes" in (excinfo.value.hint or "")

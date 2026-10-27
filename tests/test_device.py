@@ -762,3 +762,28 @@ def test_install_error_hint_for_free_app_limit() -> None:
     )
     assert error.hint is not None
     assert "three sideloaded apps" in error.hint
+
+
+def test_uninstall_without_confirmation_uses_usage_exit_code() -> None:
+    error = errors.UninstallConfirmationRequired("confirm first")
+    assert error.exit_code == 2
+
+
+def test_install_error_hint_uses_the_error_code() -> None:
+    client = installer.DeviceAppClient(usbmux.LibimobiledeviceTransport())
+    error = client._install_error_from(
+        "ApplicationVerificationFailed", "generic failure", "Install", "0xe8008021"
+    )
+    assert error.hint is not None
+    assert "three sideloaded apps" in error.hint
+
+
+def test_is_paired_locked_device_raises_with_unlock_hint(runner: FakeRunner) -> None:
+    transport = usbmux.LibimobiledeviceTransport()
+    runner.script(
+        "idevicepair",
+        FakeResult(255, "Could not validate with device because a passcode is set.\n"),
+    )
+    with pytest.raises(errors.PairingError) as excinfo:
+        transport.is_paired(UDID)
+    assert "unlock" in (excinfo.value.hint or "")

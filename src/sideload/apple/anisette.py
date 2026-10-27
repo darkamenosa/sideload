@@ -112,6 +112,15 @@ def _client_time() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _clean_locale(identifier: str) -> str:
+    """Drop NSLocale keyword suffixes such as @rg=skzzzz.
+
+    Apple's 2FA endpoints answer HTTP 500 when the locale carries a
+    keyword, so only the base identifier is sent.
+    """
+    return identifier.split("@", 1)[0]
+
+
 class AnisetteProvider:
     """Produces fresh AnisetteData using macOS private frameworks."""
 
@@ -266,14 +275,14 @@ class AnisetteProvider:
         if device_locale is not None:
             identifier = _try_invoke(device_locale, "localeIdentifier")
             if identifier is not None:
-                return str(identifier)
+                return _clean_locale(str(identifier))
         locale_class = self._optional_class("NSLocale")
         if locale_class is not None:
             current = _try_invoke(locale_class, "currentLocale")
             if current is not None:
                 identifier = _try_invoke(current, "localeIdentifier")
                 if identifier is not None:
-                    return str(identifier)
+                    return _clean_locale(str(identifier))
         return FALLBACK_LOCALE
 
     def _timezone(self) -> str:

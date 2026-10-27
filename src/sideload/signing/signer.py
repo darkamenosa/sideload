@@ -7,7 +7,8 @@ Two interchangeable backends behind one interface:
                     keychain (keychain.py), then signs each binary with
                     the system "codesign" CLI:
                         codesign --force --timestamp=none
-                                 --sign "<identity>" --entitlements <plist> <path>
+                                 --sign "<identity>" --entitlements <plist>
+                                 --generate-entitlement-der <path>
                     Resource sealing (_CodeSignature/CodeResources) is
                     produced by codesign automatically for the outer
                     bundle.
@@ -238,7 +239,11 @@ class KeychainSigner(Signer):
         try:
             if entitlements is not None:
                 entitlements_path = _write_entitlements_file(entitlements)
-                command += ["--entitlements", str(entitlements_path)]
+                command += [
+                    "--entitlements",
+                    str(entitlements_path),
+                    "--generate-entitlement-der",
+                ]
             command.append(str(path))
             result = _run_command(command)
         finally:

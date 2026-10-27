@@ -81,8 +81,8 @@ Data flow for `sideload install foo.ipa`:
    app's own keys only where granted, drop the rest with a warning
    (fail with --strict-entitlements).
 10. Sign deepest first (dylibs, framework binaries, extension bundles,
-    main executable last) using codesign with the Keychain identity,
-    falling back to ldid with PEM material.
+    main executable last) using codesign with the Keychain identity.
+    LDIDSigner exists in signer.py but the CLI does not select it in v1.
 11. Repack the IPA.
 12. Device side: verify pairing and Developer Mode, then
     ideviceinstaller -u <udid> -i <signed.ipa>. Parse progress stages
@@ -196,8 +196,9 @@ Steps:
    -21669 is a wrong code. On success the whole SRP exchange repeats.
 4. o=apptokens: Request carries u (adsid), app
    ["com.apple.gs.xcode.auth"], c, t (GsIdmsToken), cpd, and checksum
-   HMAC-SHA256(HMAC-SHA256(session_key, "HMAC key:"),
-   "apptokens" + adsid + app). Response carries et: AES-GCM blob
+   HMAC-SHA256(session_key, "apptokens" + adsid + app). The nested
+   "HMAC key:" derivation belongs only to the np check. Response
+   carries et: AES-GCM blob
    ("XYZ" magic, 16 byte IV, ciphertext, 16 byte tag) decrypting with
    sk to a plist with t[com.apple.gs.xcode.auth] = {token, expiry}.
 
@@ -287,9 +288,15 @@ interactively, never stored.
 - The persisted machine-id is sent as machineId on every CSR, so Apple
   keeps one machine identity across certificates instead of a new UUID
   per request.
+- TLS verification goes through the macOS system trust store via
+  truststore, because certifi 2026.10.23 carries no Apple Root CA. That
+  store also honors user and admin installed roots such as mkcert and
+  mitmproxy, so a login must not run while an interception proxy is
+  active. Safari and Xcode trust the same set.
 - Non secrets under ~/Library/Application Support/sideload: cached
-  App ID lists, team device lists, raw profiles, install records, logs
-  (0700). `sideload auth logout` deletes only the Keychain session.
+  App ID lists, team device lists, raw profiles, and install records
+  (0700). The logs directory is reserved for diagnostics; v1 writes no
+  command log. `sideload auth logout` deletes only the Keychain session.
 - Untrusted input: extraction rejects absolute names, backslashes,
   parent traversal, and escaping symlinks; it bounds entry count and
   uncompressed size (50k entries, 1 GiB per entry, 4 GiB total),

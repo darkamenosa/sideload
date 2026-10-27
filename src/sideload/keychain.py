@@ -325,6 +325,10 @@ class KeychainStore:
         codesigning" and matching the team id suffix.
         """
         for name in sorted(self._identity_names()):
+            # A Developer ID or distribution certificate is never valid
+            # for a development provisioning profile.
+            if not name.startswith(("Apple Development:", "iPhone Developer:")):
+                continue
             match = _IDENTITY_TEAM_SUFFIX.search(name)
             if match is not None and match.group(1) == team_identifier:
                 return SigningIdentity(

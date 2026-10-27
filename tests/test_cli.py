@@ -270,6 +270,9 @@ class FakeAppBundle:
     def kind(self) -> str:
         return self.root.suffix
 
+    def remove_appstore_artifacts(self) -> None:
+        self.artifacts_removed = True
+
     def set_bundle_identifier(self, new_bundle_id: str) -> None:
         self.bundle_identifier = new_bundle_id
 
@@ -1433,3 +1436,18 @@ def test_corrupt_config_is_quarantined(home: Path) -> None:
     assert settings.email is None
     assert not config_file.exists()
     assert (paths.root / "config.json.corrupt").exists()
+
+
+def test_sign_removes_artifacts_and_caches_the_new_app_id(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ipa = write_fake_ipa(tmp_path / "nightly.ipa")
+    code = main(["sign", str(ipa)])
+    assert code == 0
+    assert EXTRACTED_BUNDLES[-1].artifacts_removed
+    records = cache_mod.ResourceCache(config.get_paths()).load_app_ids(DSID)
+    assert RESIGNED_ID in [record.bundle_identifier for record in records]
