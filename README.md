@@ -74,6 +74,49 @@ ACCEPTANCE.md for the exact command contract.
 
 Run `sideload <command> --help` for the full flag surface.
 
+## App customization
+
+`sign` and `install` accept Sideloadly-style tweaks. All of them are
+optional; with none given the pipeline behaves exactly as before and
+the Apple ID flow never changes.
+
+    sideload sign app.ipa --name "Nightly Beta" --min-os 13.0
+    sideload sign app.ipa --remove-plugins
+    sideload install app.ipa --entitlements extra.plist --icon icon.png
+    sideload sign app.ipa --supported-devices iPhone12,3 iPad13,2
+
+- `--name TEXT` sets CFBundleDisplayName and CFBundleName.
+- `--remove-plugins` deletes PlugIns/*.appex and any Watch content
+  before any App ID, profile, or entitlement is requested, and the
+  bundle inventory is recomputed right after, so removed extensions are
+  never provisioned, never signed, and absent from the output IPA.
+  This also saves App ID quota on free accounts (one App ID per
+  extension).
+- `--entitlements PATH` loads a plist and merges it into the
+  entitlement set built for every bundle (main app and extensions, each
+  against its own profile). Keys the profile does not grant are dropped
+  with a warning; with --strict-entitlements they fail the run instead.
+  Keys the resign pipeline manages itself (application-identifier,
+  get-task-allow, com.apple.developer.team-identifier,
+  keychain-access-groups) are always rewritten from the profile,
+  whatever the plist says.
+- `--min-os VERSION` sets MinimumOSVersion, and DeploymentTarget too
+  when the Info.plist already carries that key.
+- `--supported-devices LIST` replaces UISupportedDevices; pass one
+  device identifier per argument.
+- `--icon PATH.png` replaces the app icon with the macOS sips tool. It
+  regenerates every PNG referenced by CFBundleIcons /
+  CFBundleIconFiles / CFBundleIconFile, at the pixel size the file
+  name encodes (AppIcon60x60@2x becomes a 120 pixel square) or the
+  size of the existing file, including the @2x and @3x variants. Best
+  effort and limited: icons inside compiled asset catalogs
+  (Assets.car) cannot be edited by sips, and an app with no
+  recognizable icon reference fails with a clear error instead of
+  corrupting Info.plist.
+
+Bad flag values (a missing file, a malformed version) exit 2 before
+any Apple request; failures while editing the app exit 1.
+
 ## License
 
 MIT. See LICENSE. The tool can invoke ldid (AGPL), the optional

@@ -53,7 +53,7 @@ build_parser(). Exit codes: 0 success, 1 failure, 2 usage error,
   version. Default lists user apps only; --all includes system apps.
 - Unpaired device: exit 1 with the pairing hint.
 
-### sideload sign IPA [--output OUT] [--bundle-id ID] [--team TEAMID] [--strict-entitlements]
+### sideload sign IPA [--output OUT] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags]
 
 - Signs the IPA without touching a device. Prints, in order:
   the selected team, certificate created or reused, device
@@ -64,8 +64,20 @@ build_parser(). Exit codes: 0 success, 1 failure, 2 usage error,
 - With --strict-entitlements any dropped key is an error instead.
 - App ID quota exhaustion (free accounts) exits 1 with the 10 App IDs
   explanation and which old App IDs expire soon.
+- Customization flags (also accepted by install): --name TEXT sets
+  CFBundleDisplayName and CFBundleName; --remove-plugins deletes
+  PlugIns/*.appex and Watch content before any App ID or profile is
+  created, so removed extensions are never provisioned and absent from
+  the output IPA; --entitlements PATH merges a plist, dropping keys the
+  profile does not grant with a warning (an error together with
+  --strict-entitlements); --min-os VERSION sets MinimumOSVersion and
+  DeploymentTarget when present; --supported-devices LIST replaces
+  UISupportedDevices; --icon PATH.png replaces the icon PNGs via sips
+  and fails with a clear error when the app has no recognizable icon
+  reference (compiled asset catalogs are not fully supported).
+- Bad flag values exit 2 before any Apple request.
 
-### sideload install IPA [--udid UDID] [--bundle-id ID] [--team TEAMID] [--strict-entitlements]
+### sideload install IPA [--udid UDID] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags]
 
 - Performs the sign flow, then installs over USB.
 - Prints installation stages (CreatingStagingDirectory,

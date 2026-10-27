@@ -37,6 +37,7 @@ from sideload.models import (
     TeamType,
 )
 from sideload.signing import csr as csr_mod
+from sideload.signing import customize as customize_mod
 from sideload.signing import entitlements as entitlements_mod
 from sideload.signing import ipa as ipa_mod
 
@@ -1451,3 +1452,319 @@ def test_sign_removes_artifacts_and_caches_the_new_app_id(
     assert EXTRACTED_BUNDLES[-1].artifacts_removed
     records = cache_mod.ResourceCache(config.get_paths()).load_app_ids(DSID)
     assert RESIGNED_ID in [record.bundle_identifier for record in records]
+
+
+# ------------------------------------------------ app customization flags
+
+
+def test_customization_flag_surface() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "sign",
+            "x.ipa",
+            "--name",
+            "Custom",
+            "--remove-plugins",
+            "--entitlements",
+            "extra.plist",
+            "--min-os",
+            "13.0",
+            "--supported-devices",
+            "iPhone12,3",
+            "iPad13,2",
+            "--icon",
+            "icon.png",
+        ]
+    )
+    assert args.name == "Custom"
+    assert args.remove_plugins is True
+    assert args.entitlements == "extra.plist"
+    assert args.min_os == "13.0"
+    assert args.supported_devices == ["iPhone12,3", "iPad13,2"]
+    assert args.icon == "icon.png"
+    args = parser.parse_args(["install", "x.ipa", "--name", "C", "--remove-plugins"])
+    assert args.name == "C"
+    assert args.remove_plugins is True
+    # no flags: no change, the pipeline runs exactly as before
+    args = parser.parse_args(["sign", "x.ipa"])
+    assert args.name is None
+    assert args.remove_plugins is False
+    assert args.entitlements is None
+    assert args.min_os is None
+    assert args.supported_devices is None
+    assert args.icon is None
+
+
+def write_extension_ipa(path: Path, bundle_id: str = "com.example.nightly") -> Path:
+    """A structurally real IPA: main app, one PlugIns extension, one icon."""
+    import plistlib
+    import zipfile
+
+    info = plistlib.dumps(
+        {
+            "CFBundleIdentifier": bundle_id,
+            "CFBundleExecutable": "Nightly",
+            "CFBundleIcons": {
+                "CFBundlePrimaryIcon": {"CFBundleIconFiles": ["AppIcon60x60"]}
+            },
+        }
+    )
+    ext_info = plistlib.dumps(
+        {"CFBundleIdentifier": bundle_id + ".Share", "CFBundleExecutable": "Share"}
+    )
+    stub = b"\xcf\xfa\xed\xfe" + b"\x00" * 28
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("Payload/Nightly.app/Info.plist", info)
+        archive.writestr("Payload/Nightly.app/AppIcon60x60@2x.png", b"PNGDATA")
+        archive.writestr("Payload/Nightly.app/Nightly", stub)
+        archive.writestr("Payload/Nightly.app/PlugIns/Share.appex/Info.plist", ext_info)
+        archive.writestr("Payload/Nightly.app/PlugIns/Share.appex/Share", stub)
+    return path
+
+
+def test_sign_customization_flags_reach_pipeline_and_removal_precedes_app_ids(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--remove-plugins must delete the extension before the App ID loop
+    runs, and every customization flag must reach the extracted bundle."""
+    import plistlib
+    import zipfile
+
+    monkeypatch.setattr(ipa_mod, "extract_ipa", REAL_EXTRACT_IPA)
+    monkeypatch.setattr(ipa_mod, "repack_ipa", REAL_REPACK_IPA)
+
+    events: list[str] = []
+    real_remove_plugins = customize_mod.remove_plugins
+
+    def recording_remove_plugins(bundle: object) -> list[str]:
+        removed = real_remove_plugins(bundle)  # type: ignore[arg-type]
+        if removed:
+            events.append("plugins-removed")
+        return removed
+
+    monkeypatch.setattr(customize_mod, "remove_plugins", recording_remove_plugins)
+
+    real_add_app_id = FakeDeveloperService.add_app_id
+
+    def recording_add_app_id(
+        self: FakeDeveloperService,
+        name: str,
+        bundle_identifier: str,
+        team: Team,
+    ) -> AppIDRecord:
+        events.append("app-id:" + bundle_identifier)
+        return real_add_app_id(self, name, bundle_identifier, team)
+
+    monkeypatch.setattr(FakeDeveloperService, "add_app_id", recording_add_app_id)
+
+    recorded_extra: list[dict[str, object] | None] = []
+
+    def recording_build_entitlements(
+        profile: ProvisioningProfile,
+        original: dict[str, object] | None,
+        extra: dict[str, object] | None,
+        strict: bool,
+    ) -> tuple[dict[str, object], list[str]]:
+        recorded_extra.append(extra)
+        return fake_build_entitlements(profile, original, extra, strict)
+
+    monkeypatch.setattr(
+        entitlements_mod, "build_entitlements", recording_build_entitlements
+    )
+
+    entitlements_file = tmp_path / "extra.plist"
+    entitlements_file.write_bytes(
+        plistlib.dumps(
+            {
+                "get-task-allow": True,
+                "com.apple.developer.aps-environment": "development",
+                "com.apple.private.tcc": True,
+            }
+        )
+    )
+    ipa_path = write_extension_ipa(tmp_path / "nightly.ipa")
+    code = main(
+        [
+            "sign",
+            str(ipa_path),
+            "--name",
+            "Nightly Custom",
+            "--remove-plugins",
+            "--entitlements",
+            str(entitlements_file),
+            "--min-os",
+            "13.0",
+            "--supported-devices",
+            "iPhone12,3",
+            "iPad13,2",
+        ]
+    )
+    assert code == 0
+    # removal happened before the first App ID was created, and the
+    # removed extension never requested an App ID of its own
+    assert events == ["plugins-removed", "app-id:" + RESIGNED_ID]
+    assert FakeDeveloperService.created_app_ids == [RESIGNED_ID]
+    # only the profile granted custom keys reached the extra parameter
+    assert recorded_extra == [{"get-task-allow": True}]
+    # the signer saw the recomputed inventory: just the main executable
+    _bundle, entitlements_by_path, _identity = FakeSigner.signed[0]
+    assert list(entitlements_by_path) == ["Nightly"]
+
+    out = capsys.readouterr().out
+    assert "removed extension: Share.appex" in out
+    assert "name: Nightly Custom" in out
+    assert "minimum os version: 13.0" in out
+    assert "supported devices: iPhone12,3, iPad13,2" in out
+    assert (
+        "warning: entitlement 'com.apple.developer.aps-environment' from "
+        "--entitlements is not granted by the profile and was dropped" in out
+    )
+    assert (
+        "warning: entitlement 'com.apple.private.tcc' from --entitlements is "
+        "not granted by the profile and was dropped" in out
+    )
+    # the output IPA carries every plist edit and no PlugIns content
+    output = tmp_path / "nightly.signed.ipa"
+    with zipfile.ZipFile(output) as archive:
+        names = archive.namelist()
+        assert not any("PlugIns" in name for name in names)
+        info = plistlib.loads(archive.read("Payload/Nightly.app/Info.plist"))
+    assert info["CFBundleIdentifier"] == RESIGNED_ID
+    assert info["CFBundleDisplayName"] == "Nightly Custom"
+    assert info["CFBundleName"] == "Nightly Custom"
+    assert info["MinimumOSVersion"] == "13.0"
+    assert info["UISupportedDevices"] == ["iPhone12,3", "iPad13,2"]
+    assert "Payload/Nightly.app/embedded.mobileprovision" in names
+
+
+def test_sign_icon_flag_replaces_the_icon_in_the_output_ipa(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import shutil
+    import zipfile
+
+    sips = shutil.which("sips")
+    if sips is None:
+        pytest.skip("sips not found")
+    from test_customize import _write_png
+
+    monkeypatch.setattr(ipa_mod, "extract_ipa", REAL_EXTRACT_IPA)
+    monkeypatch.setattr(ipa_mod, "repack_ipa", REAL_REPACK_IPA)
+    source = tmp_path / "icon.png"
+    _write_png(source, 64)
+    ipa_path = write_extension_ipa(tmp_path / "nightly.ipa")
+    code = main(["sign", str(ipa_path), "--icon", str(source)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "icon replaced: AppIcon60x60@2x.png" in out
+    output = tmp_path / "nightly.signed.ipa"
+    extracted_icon = tmp_path / "extracted-icon.png"
+    with zipfile.ZipFile(output) as archive:
+        extracted_icon.write_bytes(
+            archive.read("Payload/Nightly.app/AppIcon60x60@2x.png")
+        )
+    # sips regenerated the @2x variant at 60 * 2 = 120 pixels
+    measured = customize_mod._sips_dimensions(sips, extracted_icon)
+    assert measured is not None
+    assert measured == (120, 120)
+
+
+def test_sign_custom_entitlements_warn_for_ungranted_keys(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import plistlib
+
+    entitlements_file = tmp_path / "extra.plist"
+    entitlements_file.write_bytes(
+        plistlib.dumps({"get-task-allow": True, "com.apple.private.tcc": True})
+    )
+    ipa = write_fake_ipa(tmp_path / "nightly.ipa")
+    code = main(["sign", str(ipa), "--entitlements", str(entitlements_file)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert (
+        "warning: entitlement 'com.apple.private.tcc' from --entitlements is "
+        "not granted by the profile and was dropped" in out
+    )
+
+
+def test_sign_custom_entitlements_strict_exits_1(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import plistlib
+
+    entitlements_file = tmp_path / "extra.plist"
+    entitlements_file.write_bytes(
+        plistlib.dumps({"com.apple.private.tcc": True})
+    )
+    ipa = write_fake_ipa(tmp_path / "nightly.ipa")
+    code = main(
+        ["sign", str(ipa), "--entitlements", str(entitlements_file), "--strict-entitlements"]
+    )
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "--entitlements requests keys the profile does not grant" in captured.err
+    assert "com.apple.private.tcc" in captured.err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--min-os", "thirteen"],
+        ["--icon", "/definitely/not/here.png"],
+        ["--entitlements", "/definitely/not/here.plist"],
+        ["--name", ""],
+    ],
+)
+def test_sign_bad_customization_flags_exit_2(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    extra: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Bad flag values are usage errors: exit 2 before any Apple request."""
+    ipa = write_fake_ipa(tmp_path / "nightly.ipa")
+    code = main(["sign", str(ipa), *extra])
+    assert code == 2
+    assert "error:" in capsys.readouterr().err
+
+
+def test_install_customization_flags_flow_through(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(ipa_mod, "extract_ipa", REAL_EXTRACT_IPA)
+    monkeypatch.setattr(ipa_mod, "repack_ipa", REAL_REPACK_IPA)
+    script_one_device(runner)
+    script_installer(runner)
+    ipa_path = write_extension_ipa(tmp_path / "nightly.ipa")
+    code = main(["install", str(ipa_path), "--name", "Installed Custom"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "name: Installed Custom" in out
+    assert f"installed: {RESIGNED_ID}" in out
