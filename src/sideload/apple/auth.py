@@ -713,7 +713,7 @@ class GrandSlamClient:
         """Fail fast with an actionable hint on rate limits and 5xx."""
         if response.status_code == 429:
             raise AuthError(
-                "Apple is rate limiting sign in attempts from this network.",
+                f"Apple is rate limiting the {context}.",
                 hint=(
                     "wait 30 to 60 minutes, then try once; every retry now "
                     "extends the block"
@@ -858,8 +858,10 @@ class GrandSlamClient:
         except requests.RequestException as exc:
             raise AuthError(f"Could not reach Apple's Grand Slam service: {exc}") from exc
         if response.status_code == 429:
+            operation = body.get("o")
+            label = operation if isinstance(operation, str) and operation else "sign in"
             raise AuthError(
-                "Apple is rate limiting sign in attempts from this network.",
+                f"Apple is rate limiting the {label} request.",
                 hint=(
                     "wait 30 to 60 minutes, then try once; every retry now "
                     "extends the block"
