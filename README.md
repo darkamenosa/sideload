@@ -80,6 +80,20 @@ ACCEPTANCE.md for the exact command contract.
     sideload daemon install|uninstall|status  daily refresh agent
     sideload doctor [--follow-logs]     diagnostics and log tailing
 
+sign and install also accept tweak injection flags, repeatable:
+
+    sideload install nightly.ipa --inject tweak.dylib
+    sideload install nightly.ipa --inject-deb tweak.deb
+
+Each `--inject` dylib is copied into the app bundle's Frameworks
+directory and linked at launch through an LC_LOAD_DYLIB load command on
+the main executable. Each `--inject-deb` unpacks the Debian package in
+memory and injects every Library/MobileSubstrate/DynamicLibraries
+*.dylib it contains, after a basic bundle id check against the tweak's
+filter plist. Nothing is installed on the device and no package is
+unpacked except the dylibs. Dylibs must contain an arm64 slice; fat
+binaries are re-linked slice by slice.
+
 Run `sideload <command> --help` for the full flag surface.
 
 ## Auto refresh

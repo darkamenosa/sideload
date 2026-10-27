@@ -25,6 +25,11 @@ dependencies = [
     "cryptography>=42",
     "pyobjc-core>=10.1; sys_platform == 'darwin'",
     "truststore>=0.10",
+    # dylib and .deb tweak injection rewrites Mach-O load commands
+    # (LC_LOAD_DYLIB) for thin and universal binaries; see
+    # src/sideload/signing/injection.py. Imported lazily so every
+    # non-injection code path also runs without it.
+    "lief>=1.0",
 ]
 
 [project.scripts]

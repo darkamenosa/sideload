@@ -39,6 +39,7 @@ from sideload.models import (
 from sideload.signing import csr as csr_mod
 from sideload.signing import customize as customize_mod
 from sideload.signing import entitlements as entitlements_mod
+from sideload.signing import injection as injection_mod
 from sideload.signing import ipa as ipa_mod
 
 # Captured before fixtures replace them, for the real-IPA integration test.
@@ -1028,6 +1029,111 @@ def test_sign_full_flow(
     _bundle, entitlements_by_path, identity = FakeSigner.signed[0]
     assert "Nightly" in entitlements_by_path
     assert identity.team_identifier == TEAM_ID
+
+
+def test_inject_flags_parse_repeatable() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "sign",
+            "x.ipa",
+            "--inject",
+            "a.dylib",
+            "--inject",
+            "b.dylib",
+            "--inject-deb",
+            "t.deb",
+        ]
+    )
+    assert args.inject == ["a.dylib", "b.dylib"]
+    assert args.inject_deb == ["t.deb"]
+    args = parser.parse_args(
+        ["install", "x.ipa", "--udid", "U", "--inject", "a.dylib", "--inject-deb", "t.deb"]
+    )
+    assert args.inject == ["a.dylib"]
+    assert args.inject_deb == ["t.deb"]
+    args = parser.parse_args(["sign", "x.ipa"])
+    assert args.inject is None
+    assert args.inject_deb is None
+
+
+def test_sign_pipeline_injects_between_extract_and_sign(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    recorded: dict[str, object] = {}
+
+    def fake_apply_injections(
+        bundle: object,
+        dylib_paths: list[Path],
+        deb_paths: list[Path],
+        notify: object = None,
+    ) -> list[Path]:
+        events.append("inject")
+        recorded["bundle"] = bundle
+        recorded["dylibs"] = dylib_paths
+        recorded["debs"] = deb_paths
+        return []
+
+    monkeypatch.setattr(injection_mod, "apply_injections", fake_apply_injections)
+
+    original_sign_bundle = FakeSigner.sign_bundle
+
+    def fake_sign_bundle(
+        self,
+        bundle: object,
+        entitlements_by_path: dict[str, dict[str, object]],
+        identity: SigningIdentity,
+    ) -> None:
+        events.append("sign")
+
+    FakeSigner.sign_bundle = fake_sign_bundle  # type: ignore[method-assign]
+    try:
+        ipa = write_fake_ipa(tmp_path / "nightly.ipa")
+        code = main(
+            [
+                "sign",
+                str(ipa),
+                "--inject",
+                "tweak.dylib",
+                "--inject-deb",
+                "tweak.deb",
+            ]
+        )
+        assert code == 0
+        assert events[0] == "inject"
+        assert "sign" in events
+        assert recorded["bundle"] is not None
+        assert recorded["bundle"].main_bundle is EXTRACTED_BUNDLES[-1]  # type: ignore[attr-defined]
+        assert recorded["dylibs"] == [Path("tweak.dylib")]
+        assert recorded["debs"] == [Path("tweak.deb")]
+    finally:
+        FakeSigner.sign_bundle = original_sign_bundle  # type: ignore[method-assign]
+
+
+def test_sign_pipeline_skips_injection_without_flags(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_apply_injections(
+        bundle: object,
+        dylib_paths: list[Path],
+        deb_paths: list[Path],
+        notify: object = None,
+    ) -> list[Path]:
+        raise AssertionError("apply_injections must not run work without flags")
+
+    monkeypatch.setattr(injection_mod, "apply_injections", fail_apply_injections)
+    ipa = write_fake_ipa(tmp_path / "nightly.ipa")
+    code = main(["sign", str(ipa)])
+    assert code == 0
 
 
 def test_sign_rewrites_bundle_id_and_embeds_profile(

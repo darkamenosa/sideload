@@ -15,3 +15,5 @@ dist/
 *.pem
 .coverage
 htmlcov/
+
+.venv-feature/

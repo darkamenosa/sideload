@@ -53,7 +53,7 @@ build_parser(). Exit codes: 0 success, 1 failure, 2 usage error,
   version. Default lists user apps only; --all includes system apps.
 - Unpaired device: exit 1 with the pairing hint.
 
-### sideload sign IPA [--output OUT] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags]
+### sideload sign IPA [--output OUT] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags] [--inject DYLIB ...] [--inject-deb DEB ...]
 
 - Signs the IPA without touching a device. Prints, in order:
   the selected team, certificate created or reused, device
@@ -76,8 +76,21 @@ build_parser(). Exit codes: 0 success, 1 failure, 2 usage error,
   and fails with a clear error when the app has no recognizable icon
   reference (compiled asset catalogs are not fully supported).
 - Bad flag values exit 2 before any Apple request.
+- Each --inject DYLIB is copied into the main app bundle's Frameworks
+  directory (created when absent) and the main executable gains one
+  LC_LOAD_DYLIB command loading
+  "@executable_path/Frameworks/<filename>". The copy is signed before
+  the app executable. Repeating the same dylib adds no second load
+  command; a dylib without an arm64 slice exits 1.
+- Each --inject-deb DEB unpacks data.tar (xz, gzip, or lzma) in memory
+  and injects every Library/MobileSubstrate/DynamicLibraries/*.dylib.
+  A sibling .plist filter is applied as a basic bundle id check: when
+  its Bundles list names no bundle id of the app, the dylib is skipped
+  with a warning. Filters on classes or executables cannot be checked
+  and are announced as ignored. Nothing is installed on the device and
+  no other file from the package is unpacked.
 
-### sideload install IPA [--udid UDID] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags]
+### sideload install IPA [--udid UDID] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags] [--inject DYLIB ...] [--inject-deb DEB ...]
 
 - Performs the sign flow, then installs over USB.
 - Prints installation stages (CreatingStagingDirectory,
