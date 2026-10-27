@@ -434,7 +434,59 @@ classes (full class list and hints live in that module):
   portal endpoints; if that happens, nothing in this design can
   bypass it and the failure will be surfaced as DeveloperAPIError.
 
-## 10. Module ownership and implementation plan
+## 10. Auto refresh and the launchd agent
+
+Free profiles expire 7 days after issuance, so a sideloaded app stops
+launching after a week. The refresh slice automates what Sideloadly
+automates: re-sign the app with the cached certificate, App ID, and
+profile, download a fresh profile only when the cached one no longer
+covers the team, device, or certificate, and install the result over
+USB before the old profile dies.
+
+Data flow for "sideload refresh [--udid UDID] [--all]":
+
+1. Load the session from the Keychain. Missing, expired, or Apple
+   rejected exits 3 before any further Apple call; the first call of
+   the reused sign pipeline (fetchTeams) is the rejection canary.
+2. Pick targets: --all is every device with install records, otherwise
+   --udid, else the remembered default device, else the sole device
+   with records (several is a usage error listing them).
+3. List connected devices once. A device that is off, unpaired, locked,
+   or has Developer Mode off is skipped with a message; its records
+   survive untouched.
+4. Per record: skip and report when no source IPA was recorded or the
+   file is gone (records are never deleted automatically), or when the
+   record belongs to another Apple ID (dsid mismatch); otherwise re-run
+   the existing sign pipeline with the record's resigned bundle id, so
+   the same App ID, bundle id, and cached profile are reused, then
+   install the re-signed IPA from a per run temp directory and update
+   the record's profile uuid.
+5. Print one summary line per app plus a count line. Exit 0 only when
+   every attempted app was refreshed; any failure, or nothing
+   refreshable at all, is exit 1.
+
+The daemon is a per user LaunchAgent, not a system daemon: no root, no
+credential storage, and the same Keychain session as the terminal. The
+plist (dev.sideload.refresh.plist in ~/Library/LaunchAgents, 0600 file,
+0700 directory when created here) runs the current interpreter with
+"-m sideload refresh --all" on a daily StartInterval with RunAtLoad
+false, and writes stdout and stderr into the sideload logs directory
+as refresh.log. install loads it with "launchctl bootstrap gui/<uid>"
+and falls back to the legacy "launchctl load"; uninstall boots it out
+and removes the plist; status reports the file and the launchd state.
+All launchctl work goes through an injectable subprocess runner and
+all paths are injectable, so tests never touch the real launchd or the
+real ~/Library.
+
+Security constraints of the background run, stated plainly: the agent
+cannot prompt, so it can never log in, enter a 2FA code, or accept a
+Trust dialog. It depends on a valid session token in the Keychain; on
+expiry the refresh exits 3 and the log tells the user to run
+"sideload auth login" in a terminal. The refresh log carries bundle
+ids, file paths, dates, and error messages only; no token or password
+ever reaches it.
+
+## 11. Module ownership and implementation plan
 
 Agents implement only their own files. Shared files (models, errors,
 config) change only via agreement; their content is complete here
@@ -458,6 +510,7 @@ except trivial bodies.
 | src/sideload/signing/signer.py | SIGN | codesign and ldid backends, order |
 | src/sideload/device/usbmux.py | DEVICE | subprocess wrappers for idevice tools |
 | src/sideload/device/installer.py | DEVICE | ideviceinstaller driving, error mapping |
+| src/sideload/daemon.py | GLUE | refresh loop helpers, plist generation, launchctl control |
 
 Suggested implementation order: shared config and cache, then AUTH
 (smallest blast radius, testable with any Apple ID), then DEVICE
@@ -468,7 +521,7 @@ Estimated sizes: every module above fits in a few hundred lines; the
 only heavy one is auth.py (SRP plus plist plumbing), estimated 400 to
 500 lines.
 
-## 11. Research sources (read, not summarized)
+## 12. Research sources (read, not summarized)
 
 - AltSign (rileytestut/AltSign): Apple API actions, headers, resultCodes,
   SRP login, profile parsing, ALTSigner signing flow:

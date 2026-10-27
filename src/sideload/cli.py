@@ -12,6 +12,8 @@ Ownership: shared (GLUE agent). Command ownership:
     sign                       calls apple.developer + signing.* (SIGN)
     install                    calls sign pipeline + device.installer
     uninstall                  calls device.installer (DEVICE)
+    refresh                    calls daemon helpers + the sign pipeline
+    daemon                     calls daemon.RefreshDaemon (GLUE)
     doctor                     calls device.* + config (DEVICE + GLUE)
 """
 
@@ -32,6 +34,7 @@ from pathlib import Path
 from sideload import __version__, errors
 from sideload import cache as cache_mod
 from sideload import config as config_mod
+from sideload import daemon as daemon_mod
 from sideload import keychain as keychain_mod
 from sideload.apple import anisette as anisette_mod
 from sideload.apple import auth as auth_mod
@@ -84,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Sign and install iOS IPAs over USB with an Apple developer identity.",
         epilog=(
             "commands: auth login, auth status, auth logout, devices, apps, "
-            "sign, install, uninstall, doctor"
+            "sign, install, uninstall, refresh, daemon, doctor"
         ),
     )
     parser.add_argument("--version", action="version", version=__version__)
@@ -172,6 +175,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--follow-logs",
         action="store_true",
         help="stream filtered device syslog lines to find signature failures",
+    )
+
+    refresh = subparsers.add_parser(
+        "refresh",
+        parents=[common],
+        help="re-sign and reinstall recorded apps before their profiles expire",
+    )
+    refresh.add_argument(
+        "--all",
+        action="store_true",
+        help="refresh every device that has install records",
+    )
+
+    daemon = subparsers.add_parser(
+        "daemon", help="manage the daily auto refresh launchd agent"
+    )
+    daemon_sub = daemon.add_subparsers(dest="daemon_command", required=True)
+    daemon_sub.add_parser(
+        "install", help="write and load the refresh LaunchAgent plist"
+    )
+    daemon_sub.add_parser(
+        "uninstall", help="unload and remove the refresh LaunchAgent plist"
+    )
+    daemon_sub.add_parser(
+        "status", help="show whether the refresh agent is installed and loaded"
     )
 
     return parser
@@ -964,10 +992,255 @@ def cmd_install(args: argparse.Namespace) -> int:
         dsid=outcome.session.dsid,
         udid=udid,
         installed_at=datetime.now(UTC),
+        ipa_path=str(Path(args.ipa).expanduser().resolve()),
     )
     outcome.cache.record_install(record)
     _remember_default_device(udid)
     print(f"installed: {outcome.resigned_bundle_id}")
+    return 0
+
+
+# ---------------------------------------------------------------- refresh
+
+
+def _refresh_targets(
+    cache: cache_mod.ResourceCache,
+    settings: config_mod.SideloadConfig,
+    udid: str | None,
+    all_devices: bool,
+) -> list[tuple[str, list[InstallRecord]]]:
+    """Which devices and records to refresh.
+
+    --all targets every device with install records. Otherwise the
+    target is --udid, else the remembered default device, else the sole
+    device with records (a usage error when there are several).
+    """
+    if all_devices:
+        return sorted(cache.load_all_install_records().items())
+    if udid is None:
+        udid = settings.default_device
+    if udid is None:
+        devices = sorted(cache.load_all_install_records())
+        if not devices:
+            return []
+        if len(devices) > 1:
+            listing = "\n".join(f"  {device}" for device in devices)
+            raise errors.UsageError(
+                "several devices have install records; pass --udid UDID or --all:\n"
+                + listing
+            )
+        udid = devices[0]
+    return [(udid, cache.load_install_records(udid))]
+
+
+def _refresh_one_app(
+    record: InstallRecord,
+    udid: str,
+    transport: usbmux_mod.LibimobiledeviceTransport,
+    cache: cache_mod.ResourceCache,
+    session_dsid: str,
+    work_dir: Path,
+) -> daemon_mod.RefreshAppOutcome:
+    """Refresh one app: re-sign it from its recorded source IPA with the
+    cached certificate, App ID, and profile (reused by the sign
+    pipeline, which downloads a fresh profile only when needed), then
+    reinstall it over USB. Never prompts; failures become one failed
+    outcome instead of aborting the run.
+    """
+
+    def _outcome(
+        status: daemon_mod.RefreshStatus, detail: str
+    ) -> daemon_mod.RefreshAppOutcome:
+        print(f"{status.value}: {record.resigned_bundle_id} - {detail}")
+        return daemon_mod.RefreshAppOutcome(
+            resigned_bundle_id=record.resigned_bundle_id,
+            status=status,
+            detail=detail,
+        )
+
+    if not record.ipa_path:
+        return _outcome(
+            daemon_mod.RefreshStatus.SKIPPED,
+            "no source IPA is recorded; reinstall the app with: "
+            "sideload install <ipa>",
+        )
+    if record.dsid != session_dsid:
+        return _outcome(
+            daemon_mod.RefreshStatus.SKIPPED,
+            f"installed with another Apple ID (dsid {record.dsid}); "
+            "log in with that account to refresh it",
+        )
+    ipa_path = daemon_mod.source_ipa_for(record)
+    if ipa_path is None:
+        # The record is kept; the file may come back.
+        return _outcome(
+            daemon_mod.RefreshStatus.SKIPPED,
+            f"source IPA not found: {record.ipa_path}",
+        )
+
+    output = work_dir / f"{ipa_path.stem}.refresh.ipa"
+    sign_args = argparse.Namespace(
+        ipa=str(ipa_path),
+        output=str(output),
+        bundle_id=record.resigned_bundle_id,
+        team=None,
+        strict_entitlements=False,
+        udid=udid,
+    )
+    try:
+        device_name: str | None = None
+        try:
+            device_name = transport.read_device(udid).name
+        except errors.SideloadError:
+            device_name = None
+        outcome = _sign_pipeline(sign_args, udid=udid, device_name=device_name)
+        profile_mod.assert_profile_usable(outcome.profile, udid, outcome.resigned_bundle_id)
+        client = installer_mod.DeviceAppClient(transport)
+
+        def _progress(stage: str, percent: int | None) -> None:
+            suffix = f" ({percent}%)" if percent is not None else ""
+            print(f"  {stage}{suffix}")
+
+        client.install(
+            udid,
+            outcome.output_ipa,
+            _progress,
+            bundle_id=outcome.resigned_bundle_id,
+        )
+    except errors.SessionExpiredError:
+        # Stop the whole run: no Apple call beyond the first rejection.
+        print(
+            f"refresh stopped: Apple rejected the stored session while "
+            f"refreshing {record.resigned_bundle_id}"
+        )
+        raise
+    except errors.InstallError as exc:
+        if exc.install_error_name in _SIGNATURE_FAILURE_NAMES:
+            print("run: sideload doctor --follow-logs to see the underlying amfid or installd reason")
+        return _outcome(daemon_mod.RefreshStatus.FAILED, exc.message)
+    except errors.SideloadError as exc:
+        return _outcome(daemon_mod.RefreshStatus.FAILED, exc.message)
+
+    cache.record_install(
+        replace(record, profile_uuid=outcome.profile.uuid, installed_at=datetime.now(UTC))
+    )
+    return _outcome(daemon_mod.RefreshStatus.REFRESHED, f"re-signed from {ipa_path}")
+
+
+def cmd_refresh(args: argparse.Namespace) -> int:
+    """Re-sign and reinstall recorded apps before the 7 day profile
+    expires, unattended: no password, no 2FA, no trust prompts.
+
+    A missing, expired, or Apple rejected session exits 3 before any
+    further Apple call. Devices that are off or unpaired are skipped
+    with a message; the run exits 1 only when an app failed or nothing
+    could be refreshed, and 0 when every attempted app was refreshed.
+    """
+    if args.all and args.udid:
+        raise errors.UsageError("--all and --udid are mutually exclusive")
+    paths, settings, _store, session = _load_session()
+    cache = cache_mod.ResourceCache(paths)
+    transport = usbmux_mod.LibimobiledeviceTransport()
+    targets = _refresh_targets(cache, settings, args.udid, bool(args.all))
+    if not targets:
+        print("no install records found; nothing to refresh")
+        return errors.EXIT_ERROR
+
+    connected = {
+        usbmux_mod.normalize_udid(device.udid) for device in transport.list_devices()
+    }
+    outcomes: list[daemon_mod.RefreshAppOutcome] = []
+    with tempfile.TemporaryDirectory(prefix="sideload-refresh-") as work_dir:
+        for device_udid, records in targets:
+            if not records:
+                print(f"no install records for device {device_udid}; nothing to refresh")
+                continue
+            if usbmux_mod.normalize_udid(device_udid) not in connected:
+                print(f"skipping device {device_udid}: it is not connected over USB")
+                outcomes.extend(
+                    daemon_mod.skip_outcomes(records, "device not connected")
+                )
+                continue
+            try:
+                paired = transport.is_paired(device_udid)
+                developer_mode = transport.developer_mode_enabled(device_udid)
+            except errors.DeviceError as exc:
+                print(f"skipping device {device_udid}: {exc.message}")
+                outcomes.extend(daemon_mod.skip_outcomes(records, exc.message))
+                continue
+            if not paired:
+                print(f"skipping device {device_udid}: it is not paired with this Mac")
+                outcomes.extend(
+                    daemon_mod.skip_outcomes(records, "device not paired")
+                )
+                continue
+            if developer_mode is False:
+                print(f"skipping device {device_udid}: Developer Mode is off")
+                print(
+                    "  enable it on the device: Settings > Privacy and Security > "
+                    "Developer Mode"
+                )
+                outcomes.extend(
+                    daemon_mod.skip_outcomes(records, "Developer Mode is off")
+                )
+                continue
+            for record in records:
+                outcomes.append(
+                    _refresh_one_app(
+                        record,
+                        device_udid,
+                        transport,
+                        cache,
+                        session.dsid,
+                        Path(work_dir),
+                    )
+                )
+    print(daemon_mod.format_refresh_summary(outcomes), end="")
+    return daemon_mod.refresh_exit_code(outcomes)
+
+
+# ------------------------------------------------------------------ daemon
+
+
+def cmd_daemon_install(args: argparse.Namespace) -> int:
+    """Write and load the daily refresh LaunchAgent plist."""
+    _ensure_state()  # the log directory must exist for launchd to write
+    agent = daemon_mod.RefreshDaemon()
+    plist_path = agent.install()
+    print(f"launch agent: {plist_path}")
+    print(f"command: {' '.join(daemon_mod.refresh_program_arguments())}")
+    print(
+        f"schedule: every {daemon_mod.START_INTERVAL_SECONDS} seconds "
+        "(free profiles expire after 7 days)"
+    )
+    print(f"log: {agent.paths.log_path}")
+    print("remove it with: sideload daemon uninstall")
+    print(
+        "note: the agent never prompts; it needs a valid Keychain session, "
+        "so run 'sideload auth login' when the log shows exit 3"
+    )
+    return 0
+
+
+def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
+    """Unload the refresh agent and remove its plist."""
+    agent = daemon_mod.RefreshDaemon()
+    if agent.uninstall():
+        print(f"removed: {agent.paths.plist_path}")
+    else:
+        print(f"no launch agent plist at {agent.paths.plist_path}")
+    print("the refresh agent is unloaded")
+    return 0
+
+
+def cmd_daemon_status(args: argparse.Namespace) -> int:
+    """Report the plist file and the launchd state."""
+    agent = daemon_mod.RefreshDaemon()
+    status = agent.status()
+    state = "present" if status.plist_exists else "missing"
+    print(f"plist: {state} ({agent.paths.plist_path})")
+    print("agent: loaded" if status.loaded else "agent: not loaded")
+    print(f"log: {agent.paths.log_path}")
     return 0
 
 
@@ -1046,11 +1319,18 @@ _AUTH_HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "logout": cmd_auth_logout,
 }
 
+_DAEMON_HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "install": cmd_daemon_install,
+    "uninstall": cmd_daemon_uninstall,
+    "status": cmd_daemon_status,
+}
+
 _COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "devices": cmd_devices,
     "apps": cmd_apps,
     "sign": cmd_sign,
     "install": cmd_install,
+    "refresh": cmd_refresh,
     "uninstall": cmd_uninstall,
     "doctor": cmd_doctor,
 }
@@ -1069,6 +1349,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "auth":
             handler = _AUTH_HANDLERS[args.auth_command]
+        elif args.command == "daemon":
+            handler = _DAEMON_HANDLERS[args.daemon_command]
         else:
             handler = _COMMAND_HANDLERS[args.command]
         return handler(args)

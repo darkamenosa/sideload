@@ -220,6 +220,11 @@ class InstallRecord:
 
     Lets later installs reuse the same resigned bundle id, App ID, and
     profile for the same original bundle id, device, and account.
+
+    ipa_path is the absolute path of the source IPA recorded at install
+    time, so "sideload refresh" can re-sign the app before the 7 day
+    free profile expires. It is optional because records written before
+    the field existed load with None and refresh skips them.
     """
 
     original_bundle_id: str
@@ -229,6 +234,7 @@ class InstallRecord:
     dsid: str
     udid: str
     installed_at: datetime
+    ipa_path: str | None = None
 
 
 @dataclass(frozen=True)

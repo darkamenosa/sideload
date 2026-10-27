@@ -252,7 +252,22 @@ class ResourceCache:
 
     def load_install_records(self, udid: str) -> list[InstallRecord]:
         """All install records for a device, newest first."""
-        path = self.paths.install_records_path(udid)
+        return self._load_records_file(self.paths.install_records_path(udid))
+
+    def load_all_install_records(self) -> dict[str, list[InstallRecord]]:
+        """Install records grouped by device UDID, newest first within
+        each device. Backs "sideload refresh --all".
+        """
+        grouped: dict[str, list[InstallRecord]] = {}
+        installs_dir = self.paths.installs_dir
+        if not installs_dir.is_dir():
+            return grouped
+        for records_path in sorted(installs_dir.glob("*.json")):
+            for record in self._load_records_file(records_path):
+                grouped.setdefault(record.udid, []).append(record)
+        return grouped
+
+    def _load_records_file(self, path: Path) -> list[InstallRecord]:
         raw = load_json_list(path)
         records = (
             _install_record_from_dict(entry)
@@ -377,6 +392,7 @@ def _install_record_to_dict(record: InstallRecord) -> dict[str, object]:
         "dsid": record.dsid,
         "udid": record.udid,
         "installed_at": record.installed_at.isoformat(),
+        "ipa_path": record.ipa_path,
     }
 
 
@@ -406,6 +422,10 @@ def _install_record_from_dict(raw: object) -> InstallRecord | None:
     installed_at = _parse_datetime(raw.get("installed_at"))
     if installed_at is None:
         return None
+    # Old records predate the refresh feature; a missing or empty
+    # ipa_path loads as None so they stay visible and are skipped by
+    # "sideload refresh" instead of failing to deserialize.
+    ipa_path = raw.get("ipa_path")
     return InstallRecord(
         original_bundle_id=original_bundle_id,
         resigned_bundle_id=resigned_bundle_id,
@@ -414,6 +434,7 @@ def _install_record_from_dict(raw: object) -> InstallRecord | None:
         dsid=dsid,
         udid=udid,
         installed_at=installed_at,
+        ipa_path=ipa_path if isinstance(ipa_path, str) and ipa_path else None,
     )
 
 

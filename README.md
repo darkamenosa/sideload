@@ -16,6 +16,10 @@ What it does:
   rewriting, nested re-signing, repack
 - installs the signed .ipa over usbmux through installation_proxy
 - caches certificates, App IDs, and profiles per account and device
+- records the source IPA of every install and can re-sign and reinstall
+  apps before the 7 day free profile expires
+- optional per user launchd agent that refreshes every recorded device
+  once a day, unattended
 - stores the Apple ID session in the macOS Keychain; the Apple ID
   password is never stored anywhere
 
@@ -48,6 +52,8 @@ ACCEPTANCE.md for the exact command contract.
   running as the same user can invoke /usr/bin/security and
   /usr/bin/codesign without an extra prompt. This is the same model
   Sideloadly and ipatool use.
+- The refresh daemon stores no credentials; it reuses the Keychain
+  session, and its log never receives tokens or passwords.
 - `uninstall` requires --yes; nothing is deleted without it.
 
 ## Prerequisites
@@ -70,9 +76,48 @@ ACCEPTANCE.md for the exact command contract.
     sideload sign IPA [options]         sign without installing
     sideload install IPA [options]      sign and install
     sideload uninstall BID --yes        uninstall (explicit confirm)
+    sideload refresh [--udid UDID] [--all]   re-sign recorded apps
+    sideload daemon install|uninstall|status  daily refresh agent
     sideload doctor [--follow-logs]     diagnostics and log tailing
 
 Run `sideload <command> --help` for the full flag surface.
+
+## Auto refresh
+
+Free provisioning profiles expire 7 days after issuance. Every install
+records the absolute path of the source IPA, so `sideload refresh` can
+re-sign each recorded app (reusing the cached certificate, App ID, and
+profile, and downloading a fresh profile only when needed) and
+reinstall it over USB before the old profile dies:
+
+    sideload refresh [--udid UDID] [--all]
+
+Refresh never prompts: no password, no 2FA code, no Trust dialog. It
+needs a valid Keychain session, skips devices that are off, unpaired,
+or have Developer Mode off, and reports and keeps records whose source
+IPA is missing. It prints one line per app plus a summary. Exit 0
+means every attempted app was refreshed, 1 means a failure or that
+nothing could be refreshed, and 3 means the session expired and
+`sideload auth login` is needed.
+
+For Sideloadly style unattended refreshes, install the per user launchd
+agent:
+
+    sideload daemon install
+
+It writes ~/Library/LaunchAgents/dev.sideload.refresh.plist (0600 file;
+0700 directory when created) that runs the same interpreter with
+`-m sideload refresh --all` once a day (RunAtLoad false), and pipes
+stdout and stderr into
+~/Library/Application Support/sideload/logs/refresh.log.
+
+The agent cannot prompt for anything. It depends on a valid session
+token in the Keychain; when the token expires the refresh exits 3 and
+the log says to run `sideload auth login` in a terminal. The log
+contains bundle ids, file paths, dates, and error messages only, never
+tokens or passwords. Remove the agent with `sideload daemon uninstall`;
+`sideload daemon status` reports whether the plist exists and whether
+launchd lists the agent.
 
 ## License
 
