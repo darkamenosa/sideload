@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sideload"
+version = "0.1.0"
+description = "Sign and install iOS IPAs over USB using a free or paid Apple developer identity"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+keywords = ["ios", "sideload", "ipa", "codesign", "provisioning", "usbmux"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+]
+
+dependencies = [
+    "requests>=2.31",
+    "cryptography>=42",
+    "pyobjc-core>=10.1; sys_platform == 'darwin'",
+    "truststore>=0.10",
+]
+
+[project.scripts]
+sideload = "sideload.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "mypy>=1.10",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.setuptools.package-data]
+sideload = ["py.typed"]

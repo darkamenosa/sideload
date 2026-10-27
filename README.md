@@ -1,0 +1,74 @@
+# sideload
+
+An open source macOS CLI that signs unsigned iOS .ipa files with an
+Apple developer identity (free Apple ID personal team or paid team)
+and installs them on a connected iPhone over USB.
+
+    sideload auth login
+    sideload install nightly.ipa
+
+What it does:
+
+- lists USB devices, installed apps, and uninstalls apps (with an
+  explicit confirmation flag only)
+- signs an .ipa end to end: team selection, device registration,
+  certificate request, App ID, provisioning profile, entitlement
+  rewriting, nested re-signing, repack
+- installs the signed .ipa over usbmux through installation_proxy
+- caches certificates, App IDs, and profiles per account and device
+- stores the Apple ID session in the macOS Keychain; the Apple ID
+  password is never stored anywhere
+
+## Status
+
+Implemented. Unit and integration tests cover the Apple protocol,
+the signing pipeline, the device transport, and the CLI. A live end
+to end install on a real device is the remaining acceptance step; see
+ACCEPTANCE.md for the exact command contract.
+
+## Security model
+
+- The Apple ID password is read with getpass, used for one SRP
+  exchange, and never written to disk, argv, or logs.
+- The session token is stored in the Keychain as base64 JSON and
+  written through `security -i` on stdin, so no secret appears in a
+  process argument list.
+- The signing .p12 is created in the per-user temp directory with 0600,
+  imported with codesign-only trust, and deleted in a finally block.
+- IPA extraction treats the archive as hostile: path and symlink
+  escapes are rejected, size and entry counts are bounded, setuid bits
+  are stripped, and the work directory is removed on exit.
+- Apple requests refuse redirects, and TLS verification is never
+  disabled.
+- `uninstall` requires --yes; nothing is deleted without it.
+
+## Prerequisites
+
+- macOS with Xcode (uses codesign, security, and AOSKit)
+- Python 3.12 or newer
+- brew install libimobiledevice ideviceinstaller
+
+## Install
+
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install -e .
+
+## Commands
+
+    sideload auth login|status|logout   Apple ID session (Keychain)
+    sideload devices [--udid UDID]      list USB devices
+    sideload apps [--udid UDID]          list installed apps
+    sideload sign IPA [options]         sign without installing
+    sideload install IPA [options]      sign and install
+    sideload uninstall BID --yes        uninstall (explicit confirm)
+    sideload doctor [--follow-logs]     diagnostics and log tailing
+
+Run `sideload <command> --help` for the full flag surface.
+
+## License
+
+MIT. See LICENSE. The tool can invoke ldid (AGPL), the optional
+fallback signer, and libimobiledevice/ideviceinstaller (LGPL/GPL),
+strictly as separate processes; no copyleft code is linked or vendored. See DESIGN.md for
+the dependency study.
