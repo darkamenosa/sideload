@@ -571,6 +571,16 @@ def test_frozen_flag_surface() -> None:
     args = parser.parse_args(["install", "x.ipa", "--udid", "U", "--team", "T"])
     assert args.command == "install"
     assert args.udid == "U"
+    args = parser.parse_args(
+        ["sign", "x.ipa", "--p12", "dev.p12", "--profile", "dev.mobileprovision"]
+    )
+    assert args.p12 == "dev.p12"
+    assert args.profile == "dev.mobileprovision"
+    args = parser.parse_args(
+        ["install", "x.ipa", "--p12", "dev.p12", "--profile", "dev.mobileprovision"]
+    )
+    assert args.p12 == "dev.p12"
+    assert args.profile == "dev.mobileprovision"
     args = parser.parse_args(["uninstall", "com.x", "--udid", "U", "--yes"])
     assert args.yes is True
     args = parser.parse_args(["auth", "login", "--email", "a@b.c", "--rotate-certificate"])

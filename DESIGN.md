@@ -40,7 +40,8 @@ signatures).
       |           output: AppleSession (dsid, GS token, expiry)
       |
       +-- SIGN:  apple/developer.py, signing/{csr,profile,
-      |           entitlements,ipa,signer}.py, cache.py reads/writes
+      |           entitlements,ipa,signer}.py, signing/certificate.py
+      |           runs the no-Apple certificate path
       |           input:  AppleSession, AnisetteProvider
       |           output: signed .ipa, ProvisioningProfile
       |
@@ -94,6 +95,42 @@ Data flow for `sideload install foo.ipa`:
     tapping its icon on the Home Screen. Launching from the CLI would
     require mounting a Developer Disk Image and driving debugserver;
     that is explicitly out of scope for v1 (section 9).
+
+### 2.1 Certificate signing path (signing/certificate.py)
+
+`--p12 PATH --profile PATH` on sign and install replaces every Apple
+step above with local work. This is what Sideloadly calls certificate
+signing: the user owns a developer identity (.p12, certificate plus
+private key) and a .mobileprovision that lists that certificate, the
+bundle id, and the devices. No Grand Slam login, no anisette, no
+developerservices2 action, no App ID creation, no team fetch, and no
+Keychain session; the modules apple/* are never imported by this
+path. Flow:
+
+1. Validate the three input files (usage errors before any prompt).
+2. Parse the profile with the real `security cms` path; the profile
+   fixes the team and bundle id (`--team` and `--bundle-id` may only
+   agree, else exit 2). A wildcard profile (application-identifier
+   TEAMID.*) keeps the original bundle id and honors `--bundle-id`.
+3. Extract the IPA; assert_profile_usable validates expiry, the
+   targeted device (skipped for sign only), and the bundle id; the p12
+   certificate must be one of the profile's DeveloperCertificates.
+4. Read the .p12 passphrase with getpass and unlock the p12 locally
+   (cryptography) so a wrong passphrase fails before any Keychain
+   change; import into the login Keychain with
+   `security import -T /usr/bin/codesign` (passphrase on stdin) and
+   use the discovered identity name. `security import` only accepts
+   the legacy p12 wrapping (verified live: AES plus SHA-256 MAC p12s
+   from OpenSSL 3 fail with "MAC verification failed"), so modern
+   p12s are re-wrapped locally into that form and imported from a
+   0600 temp file that is deleted immediately.
+5. One specific profile cannot cover .appex child bundle ids, so a
+   specific profile plus extensions fails before signing with the
+   wildcard-profile hint; a wildcard profile rewrites each extension
+   id under the parent and embeds the same profile.
+6. Then the shared tail: rewrite Info.plist ids, embed the profile,
+   build entitlements from it (strict mode honored), sign deepest
+   first, repack, and for install drive the normal device install.
 
 ## 3. Chosen stack and licenses
 
@@ -281,6 +318,11 @@ interactively, never stored.
   runs do not re-prompt, then deleted. The import command, including
   the p12 passphrase, travels on stdin, never argv. Identity discovered
   via `security find-identity -v -p codesigning` by team id suffix.
+  The p12 is serialized with the legacy wrapping (PBE-SHA1-3DES, SHA-1
+  MAC) because Apple's security CLI rejects modern AES p12s even with
+  the correct passphrase (verified live); user provided p12s in that
+  modern form are re-wrapped locally by signing/certificate.py before
+  the import.
 - Cached profiles are reused only while the profile's team, device
   list, and developer certificate still match the selected team, the
   target device, and the current Keychain identity; otherwise a fresh
@@ -518,6 +560,7 @@ except trivial bodies.
 | src/sideload/signing/ipa.py | SIGN | unzip, inventory, plist edits, repack |
 | src/sideload/signing/signer.py | SIGN | codesign and ldid backends, order |
 | src/sideload/signing/customize.py | SIGN | app customization: plist edits, plugin removal, icon via sips, custom entitlements |
+| src/sideload/signing/certificate.py | SIGN | p12 + profile signing without Apple |
 | src/sideload/device/usbmux.py | DEVICE | subprocess wrappers for idevice tools |
 | src/sideload/device/installer.py | DEVICE | ideviceinstaller driving, error mapping |
 | src/sideload/daemon.py | GLUE | refresh loop helpers, plist generation, launchctl control |

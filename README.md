@@ -14,6 +14,9 @@ What it does:
 - signs an .ipa end to end: team selection, device registration,
   certificate request, App ID, provisioning profile, entitlement
   rewriting, nested re-signing, repack
+- also signs from an existing developer certificate and provisioning
+  profile (`--p12` and `--profile`), the certificate signing path
+  Sideloadly offers: no Apple ID login and no Apple API call
 - installs the signed .ipa over usbmux through installation_proxy
 - caches certificates, App IDs, and profiles per account and device
 - records the source IPA of every install and can re-sign and reinstall
@@ -175,6 +178,24 @@ the Apple ID flow never changes.
 
 Bad flag values (a missing file, a malformed version) exit 2 before
 any Apple request; failures while editing the app exit 1.
+
+## Certificate signing
+
+Use a developer certificate and provisioning profile you already own,
+with no Apple ID login and no Apple developer API call:
+
+    sideload sign nightly.ipa --p12 dev.p12 --profile prof.mobileprovision
+    sideload install nightly.ipa --p12 dev.p12 --profile prof.mobileprovision
+
+The .p12 passphrase is read with getpass, never from argv, never
+stored, and never printed. The identity is imported into the login
+Keychain trusted for /usr/bin/codesign only. The profile decides the
+team, the bundle id, and the devices: the app is re-signed as the
+profile's bundle id unless the profile is a wildcard (TEAMID.*), which
+keeps the original id. A wildcard profile also covers app extensions;
+a specific profile cannot, and the run explains that before signing.
+Modern .p12 files that the macOS security CLI refuses (OpenSSL 3 AES
+exports) are re-wrapped locally and imported.
 
 ## License
 

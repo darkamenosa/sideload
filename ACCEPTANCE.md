@@ -53,7 +53,7 @@ build_parser(). Exit codes: 0 success, 1 failure, 2 usage error,
   version. Default lists user apps only; --all includes system apps.
 - Unpaired device: exit 1 with the pairing hint.
 
-### sideload sign IPA [--output OUT] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags] [--inject DYLIB ...] [--inject-deb DEB ...]
+### sideload sign IPA [--output OUT] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags] [--inject DYLIB ...] [--inject-deb DEB ...] [--p12 PATH] [--profile PATH]
 
 - Signs the IPA without touching a device. Prints, in order:
   the selected team, certificate created or reused, device
@@ -90,7 +90,7 @@ build_parser(). Exit codes: 0 success, 1 failure, 2 usage error,
   and are announced as ignored. Nothing is installed on the device and
   no other file from the package is unpacked.
 
-### sideload install IPA [--udid UDID] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags] [--inject DYLIB ...] [--inject-deb DEB ...]
+### sideload install IPA [--udid UDID] [--bundle-id ID] [--team TEAMID] [--strict-entitlements] [customization flags] [--inject DYLIB ...] [--inject-deb DEB ...] [--p12 PATH] [--profile PATH]
 
 - Performs the sign flow, then installs over USB.
 - Prints installation stages (CreatingStagingDirectory,
@@ -101,6 +101,34 @@ build_parser(). Exit codes: 0 success, 1 failure, 2 usage error,
   name, description, and the matching hint, plus the suggestion
   "run: sideload doctor --follow-logs" for the underlying amfid or
   installd reason.
+
+### Certificate signing: sign and install with --p12 and --profile
+
+- Both flags together switch sign and install to the certificate
+  pipeline: no Apple ID session is loaded, no anisette is produced, and
+  no developer API call happens. Passing only one of the two flags is
+  a usage error (exit 2). The command works with no stored session at
+  all, and install on this path never exits 3.
+- The .p12 passphrase is read with getpass (never argv, never stored,
+  never logged); a wrong passphrase exits 1 with a clean message before
+  anything touches the Keychain.
+- The .mobileprovision is decoded with the real `security cms` path
+  and validated: expiry always, the targeted device on install (sign
+  only skips the device check), and the bundle id.
+- The profile application-identifier decides the bundle id that is
+  signed; a conflicting `--bundle-id` exits 2, and `--team` must match
+  the profile team. The .p12 certificate must be one of the profile's
+  DeveloperCertificates, else exit 1 before signing.
+- Info.plist is rewritten to the profile bundle id and the profile is
+  embedded before signing. A wildcard profile (TEAMID.*) keeps the
+  original bundle id and honors `--bundle-id`; extensions get child ids
+  under it. A specific profile cannot cover app extensions and the run
+  fails before signing with that explanation.
+- The identity is imported into the login Keychain trusted for
+  /usr/bin/codesign only. Modern .p12 files the macOS security CLI
+  refuses on format grounds are re-wrapped locally and imported.
+- install with the flags runs the regular device install afterwards
+  (stages, hints, and the install record keyed by the profile team).
 
 ### sideload uninstall BUNDLE_ID [--udid UDID] --yes
 
