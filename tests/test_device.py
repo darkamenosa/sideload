@@ -265,7 +265,7 @@ def test_wait_for_pair_no_device_raises(runner: FakeRunner) -> None:
 
 def test_normalize_udid() -> None:
     assert usbmux.normalize_udid("00008101-000000000000000E") == "00008101000000000000000e"
-    assert usbmux.normalize_udid(UDID) == usbmux.normalize_udid(UDID2.replace("2E", "1E"))
+    assert usbmux.normalize_udid(UDID.upper()) == usbmux.normalize_udid(UDID.lower())
 
 
 def test_disk_usage(runner: FakeRunner) -> None:

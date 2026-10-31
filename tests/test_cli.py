@@ -1232,7 +1232,7 @@ def test_cached_profile_for_another_device_is_refreshed(
     cache = cache_mod.ResourceCache(paths)
     stale = replace(
         make_profile("STALE", RESIGNED_ID, days=7.0),
-        device_ids=("00008101-000000000000000E",),
+        device_ids=("00008101-000000000000000D",),
     )
     cache.save_profile(DSID, stale)
     script_one_device(runner)
@@ -1500,7 +1500,7 @@ def test_profile_covers_requires_the_current_certificate() -> None:
     der = b"\x30\x82\x01\x00\x00\x00"
     assert _profile_covers(profile, team, UDID, der)
     assert not _profile_covers(profile, team, UDID, b"another-certificate")
-    other_device = replace(profile, device_ids=("00008101-000000000000000E",))
+    other_device = replace(profile, device_ids=("00008101-000000000000000D",))
     assert not _profile_covers(other_device, team, UDID, der)
 
 

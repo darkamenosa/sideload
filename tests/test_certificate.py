@@ -743,7 +743,7 @@ def test_install_device_not_in_profile_exits_1(
     monkeypatch.setattr(usbmux_mod, "_run_subprocess", runner)
     monkeypatch.setattr(installer_mod, "_run_subprocess", runner)
     script_one_device(runner)
-    profile_bytes = build_profile(cert_material, devices=("00008101-000000000000000E",))
+    profile_bytes = build_profile(cert_material, devices=("00008101-000000000000000D",))
     ipa, p12, profile = write_inputs(tmp_path, cert_material, profile_bytes=profile_bytes)
     code = main(["install", str(ipa), "--p12", str(p12), "--profile", str(profile)])
     assert code == 1
