@@ -1884,3 +1884,26 @@ def test_install_customization_flags_flow_through(
     out = capsys.readouterr().out
     assert "name: Installed Custom" in out
     assert f"installed: {RESIGNED_ID}" in out
+
+
+def test_sign_reuses_existing_app_id_case_insensitively(
+    home: Path,
+    runner: FakeRunner,
+    fake_sign_stack: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    existing = AppIDRecord(
+        identifier="APPID-UP",
+        name="existing",
+        bundle_identifier=RESIGNED_ID.upper(),
+    )
+    monkeypatch.setattr(
+        FakeDeveloperService, "fetch_app_ids", lambda self, team: [existing]
+    )
+    ipa = write_fake_ipa(tmp_path / "nightly.ipa")
+    code = main(["sign", str(ipa)])
+    assert code == 0
+    assert EXTRACTED_BUNDLES[-1].bundle_identifier == RESIGNED_ID.upper()
+    assert "reusing existing case" in capsys.readouterr().out

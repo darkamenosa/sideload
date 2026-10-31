@@ -956,6 +956,27 @@ def _sign_pipeline(
     # step 6: one App ID per bundle (main app plus each extension)
     app_ids = developer.fetch_app_ids(team)
     cache.save_app_ids(session.dsid, app_ids)
+    # Apple treats bundle identifiers case-insensitively for uniqueness.
+    # Sideloadly registered the uppercase team suffix, so the default
+    # lowercase id would collide with it on addAppId. Reuse the existing
+    # record and sign with its exact case.
+    existing_case = next(
+        (
+            record
+            for record in app_ids
+            if record.bundle_identifier.casefold() == resigned_bundle_id.casefold()
+        ),
+        None,
+    )
+    if (
+        existing_case is not None
+        and existing_case.bundle_identifier != resigned_bundle_id
+    ):
+        print(
+            "bundle id: reusing existing case "
+            f"{existing_case.bundle_identifier}"
+        )
+        resigned_bundle_id = existing_case.bundle_identifier
     app_id = _ensure_app_id(
         developer, team, cache, session.dsid, app_ids, resigned_bundle_id
     )
