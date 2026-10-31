@@ -43,6 +43,7 @@ from typing import Final
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
+from cryptography.x509.oid import NameOID
 
 from sideload.errors import KeychainError
 from sideload.models import Account, AppleSession, SigningIdentity
@@ -327,7 +328,9 @@ class KeychainStore:
         for name in sorted(self._identity_names()):
             # A Developer ID or distribution certificate is never valid
             # for a development provisioning profile.
-            if not name.startswith(("Apple Development:", "iPhone Developer:")):
+            if not name.startswith(
+                ("Apple Development:", "iPhone Developer:", "iOS Development:")
+            ):
                 continue
             match = _IDENTITY_TEAM_SUFFIX.search(name)
             if match is not None and match.group(1) == team_identifier:
@@ -335,6 +338,31 @@ class KeychainStore:
                     team_identifier=team_identifier,
                     keychain_identity=name,
                 )
+            # Apple's certificate name often carries a certificate id in
+            # parentheses, not the team id. The subject OU is the team.
+            if self._certificate_team(name) == team_identifier:
+                return SigningIdentity(
+                    team_identifier=team_identifier,
+                    keychain_identity=name,
+                )
+        return None
+
+    def _certificate_team(self, identity_name: str) -> str | None:
+        """Team identifier from the certificate's subject OU, if readable."""
+        args = ["find-certificate", "-c", identity_name, "-p"]
+        if self.keychain is not None:
+            args.extend(["-k", self.keychain])
+        result = self._run(args)
+        if result.returncode != 0:
+            return None
+        try:
+            certificate = x509.load_pem_x509_certificate(result.stdout)
+        except ValueError:
+            return None
+        for attribute in certificate.subject.get_attributes_for_oid(
+            NameOID.ORGANIZATIONAL_UNIT_NAME
+        ):
+            return str(attribute.value)
         return None
 
     def delete_identity(self, identity_name: str) -> None:

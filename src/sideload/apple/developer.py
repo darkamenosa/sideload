@@ -355,11 +355,43 @@ class DeveloperServiceClient:
             team,
         )
         cert_request = _as_dict(response.get("certRequest"))
-        if not cert_request:
-            raise DeveloperAPIError(
-                "ios/submitDevelopmentCSR.action returned no certRequest payload"
+        if cert_request:
+            try:
+                return self._developer_certificate(cert_request)
+            except DeveloperAPIError:
+                # Apple's CSR response shape changes over time; the
+                # certificate is always visible in the team list, so
+                # fall back to locating it there by machine identity.
+                pass
+        return self._find_issued_certificate(team, machine_id, machine_name)
+
+    def _find_issued_certificate(
+        self, team: Team, machine_id: str, machine_name: str
+    ) -> DeveloperCertificate:
+        """Locate the certificate just issued for this machine."""
+        certificates = self.list_certificates(team)
+        wanted = machine_id.upper()
+        for certificate in certificates:
+            if certificate.machine_id.upper() == wanted:
+                return certificate
+        named = [
+            certificate
+            for certificate in certificates
+            if certificate.machine_name == machine_name
+        ]
+        if named:
+            return max(
+                named,
+                key=lambda certificate: (
+                    certificate.expires_at.timestamp()
+                    if certificate.expires_at
+                    else 0.0
+                ),
             )
-        return self._developer_certificate(cert_request)
+        raise DeveloperAPIError(
+            "the certificate was issued but could not be found in the team certificate list",
+            hint="remove the extra certificate in the Apple developer portal, then retry",
+        )
 
     def _developer_certificate(self, payload: dict[str, Any]) -> DeveloperCertificate:
         attributes = _as_dict(payload.get("attributes"))

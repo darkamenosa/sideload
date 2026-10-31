@@ -729,6 +729,7 @@ class FakeSecurityRunner:
         self.identities: set[str] = set()
         self.imports: list[str] = []
         self.fail_command: str | None = None
+        self.certificates: dict[str, bytes] = {}
 
     def __call__(self, args: list[str]) -> subprocess.CompletedProcess[bytes]:
         command = args[0]
@@ -772,6 +773,13 @@ class FakeSecurityRunner:
             name = _option(args, "-c")
             self.identities = {item for item in self.identities if item != name}
             return subprocess.CompletedProcess(args, returncode=0, stdout=b"", stderr=b"")
+        if command == "find-certificate":
+            name = _option(args, "-c")
+            if name not in self.certificates:
+                return self._not_found(args)
+            return subprocess.CompletedProcess(
+                args, returncode=0, stdout=self.certificates[name], stderr=b""
+            )
         raise AssertionError(f"unexpected security command: {args}")
 
     def run_stdin(self, line: str) -> subprocess.CompletedProcess[bytes]:
@@ -1105,3 +1113,22 @@ def test_full_login_accepts_openstep_ascii_spd(monkeypatch) -> None:
     _, session = server.authenticate()
     assert session.dsid == ADSID
     assert session.gs_token == GS_TOKEN
+
+
+def test_find_identity_accepts_ios_development_prefix() -> None:
+    runner = FakeSecurityRunner()
+    runner.identities = {"iOS Development: Example Team (AB12CD34EF)"}
+    identity = make_store(runner).find_identity("AB12CD34EF")
+    assert identity is not None
+    assert identity.keychain_identity is not None
+    assert identity.keychain_identity.startswith("iOS Development:")
+
+
+def test_find_identity_uses_certificate_ou_for_team(monkeypatch) -> None:
+    runner = FakeSecurityRunner()
+    runner.identities = {"iPhone Developer: user@example.com (CERTID1234)"}
+    store = make_store(runner)
+    monkeypatch.setattr(store, "_certificate_team", lambda name: "AB12CD34EF")
+    identity = store.find_identity("AB12CD34EF")
+    assert identity is not None
+    assert identity.keychain_identity == "iPhone Developer: user@example.com (CERTID1234)"

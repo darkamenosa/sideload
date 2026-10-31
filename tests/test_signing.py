@@ -1744,3 +1744,25 @@ def test_extract_rejects_watch_inside_the_app(tmp_path):
         )
     with pytest.raises(errors.UnsupportedIPAError, match="watchOS"):
         ipa.extract_ipa(archive_path, dest_dir=tmp_path / "work")
+
+
+def test_csr_response_without_content_falls_back_to_certificate_list(dev, monkeypatch):
+    from sideload.models import DeveloperCertificate
+
+    team = Team(identifier="FREE1", name="Personal", team_type=TeamType.FREE)
+    issued = DeveloperCertificate(
+        identifier="CERT1",
+        machine_name="Mac",
+        machine_id="MACHINE-1",
+        certificate_pem=b"pem",
+    )
+    monkeypatch.setattr(
+        dev.client,
+        "_send_action",
+        lambda *args, **kwargs: {"certRequest": {"id": "C1", "attributes": {}}},
+    )
+    monkeypatch.setattr(dev.client, "list_certificates", lambda team: [issued])
+    certificate = dev.client.create_development_certificate(
+        "CSR-PEM", "Mac", team, machine_id="machine-1"
+    )
+    assert certificate.identifier == "CERT1"
