@@ -1,4 +1,4 @@
-.venv/
+.venv*/
 __pycache__/
 *.pyc
 *.egg-info/
@@ -7,13 +7,13 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-*.signed.ipa
-.DS_Store
 *.ipa
+*.signed.ipa
 *.p12
 *.mobileprovision
 *.pem
+*.log
+*.tmp
+.DS_Store
 .coverage
 htmlcov/
-
-.venv-feature/
